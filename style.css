@@ -1,0 +1,106 @@
+/* Custom Styles for Virtual Radio Mic */
+
+:root {
+  --color-primary: #10b981;
+  --color-danger: #ef4444;
+  --color-warning: #f59e0b;
+}
+
+/* タップハイライト防止 & テキスト選択無効（モバイルでの操作性向上） */
+* {
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+/* スライダーのスタイリング */
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #0f172a;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  transition: transform 0.1s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+}
+
+input[type="range"]::-webkit-slider-thumb:active {
+  transform: scale(1.25);
+  background: #059669;
+}
+
+/* マイクボタンの状態別スタイル */
+#main-mic-btn.active {
+  background-color: #ecfdf5;
+  border-color: #10b981;
+  box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.2), 0 10px 25px -5px rgba(16, 185, 129, 0.4);
+}
+
+#main-mic-btn.active #mic-icon-wrapper {
+  background-color: #10b981;
+  color: #ffffff;
+  animation: pulse-ring 2s infinite ease-out;
+}
+
+#main-mic-btn.active #mic-status-text {
+  color: #047857;
+}
+
+#main-mic-btn.ptt-active {
+  background-color: #fef2f2;
+  border-color: #ef4444;
+  box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.25), 0 10px 25px -5px rgba(239, 68, 68, 0.4);
+}
+
+#main-mic-btn.ptt-active #mic-icon-wrapper {
+  background-color: #ef4444;
+  color: #ffffff;
+}
+
+#main-mic-btn.ptt-active #mic-status-text {
+  color: #b91c1c;
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 14px rgba(16, 185, 129, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
+
+/* FXカードボタンのアクティブスタイル */
+.fx-card-btn.active {
+  background-color: #eef2ff !important;
+  border-color: #6366f1 !important;
+  box-shadow: 0 1px 3px rgba(99, 102, 241, 0.2) !important;
+}
+
+.fx-card-btn.active .fx-icon {
+  background-color: #6366f1 !important;
+  color: #ffffff !important;
+  border-color: #4f46e5 !important;
+}
+
+.fx-card-btn.active span.text-xs {
+  color: #4338ca !important;
+}
+
+/* 録音中の点滅アニメーション */
+.recording-pulse {
+  animation: blink 1s infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
