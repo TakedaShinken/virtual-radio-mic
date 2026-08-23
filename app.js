@@ -51,7 +51,7 @@ class AudioManager {
       reverb: false
     };
 
-    this.echoDepth = 0.45; // 0.1 - 0.8
+    this.echoDepth = 0.50; // 0.0 - 1.0 (中心 50%)
     this.isMicActive = false;
     this.selectedDeviceId = '';
     this.selectedOutputDeviceId = '';
@@ -347,11 +347,12 @@ class AudioManager {
     return active;
   }
 
-  setEchoDepth(depth) {
-    this.echoDepth = depth;
+  setEchoDepth(depthRatio) {
+    this.echoDepth = depthRatio;
     if (this.echoFeedbackNode && this.ctx) {
       const now = this.ctx.currentTime;
-      this.echoFeedbackNode.gain.linearRampToValueAtTime(depth, now + 0.02);
+      const feedbackGain = Math.min(0.82, depthRatio * 0.82);
+      this.echoFeedbackNode.gain.linearRampToValueAtTime(feedbackGain, now + 0.02);
     }
   }
 
@@ -933,6 +934,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   btnResetFx.addEventListener('click', () => {
     audioManager.resetAllFX();
     [fxEchoBtn, fxRadioBtn, fxRobotBtn, fxReverbBtn].forEach(btn => btn.classList.remove('active'));
+    sliderEchoDepth.value = 50;
+    valEchoDepth.textContent = '50%';
+    audioManager.setEchoDepth(0.50);
   });
 
   sliderEchoDepth.addEventListener('input', () => {
