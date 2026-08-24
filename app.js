@@ -63,6 +63,17 @@ class AudioManager {
     this.audioElement = null;
   }
 
+  async kickAudioSession() {
+    if ('audioSession' in navigator) {
+      try {
+        navigator.audioSession.type = 'auto';
+        navigator.audioSession.type = 'play-and-record';
+      } catch (e) {
+        console.warn("navigator.audioSession warning:", e);
+      }
+    }
+  }
+
   async setOutputDevice(deviceId) {
     this.selectedOutputDeviceId = deviceId || '';
     if (this.audioElement && typeof this.audioElement.setSinkId === 'function') {
@@ -84,6 +95,8 @@ class AudioManager {
   }
 
   async init(deviceId = '') {
+    await this.kickAudioSession();
+
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       this.ctx = new AudioContextClass({
@@ -268,13 +281,16 @@ class AudioManager {
       this.stream.getTracks().forEach(track => track.stop());
     }
 
+    await this.kickAudioSession();
+
     const constraints = {
       audio: {
         deviceId: this.selectedDeviceId ? { exact: this.selectedDeviceId } : undefined,
         echoCancellation: false,
         noiseSuppression: false,
         autoGainControl: false,
-        latency: 0
+        channelCount: { ideal: 1 },
+        sampleRate: { ideal: 48000 }
       }
     };
 
@@ -302,9 +318,13 @@ class AudioManager {
     const now = this.ctx.currentTime;
     this.muteGainNode.gain.cancelScheduledValues(now);
     if (active) {
+      this.kickAudioSession();
       this.muteGainNode.gain.setValueAtTime(this.muteGainNode.gain.value, now);
       this.muteGainNode.gain.linearRampToValueAtTime(1.0, now + 0.03);
       if (this.audioElement) {
+        if (!this.audioElement.srcObject && this.streamDestination) {
+          this.audioElement.srcObject = this.streamDestination.stream;
+        }
         this.audioElement.play().catch(e => console.log("audioElement play auto-resume:", e));
       }
     } else {
