@@ -57,12 +57,23 @@ class AudioManager {
     this.selectedOutputDeviceId = '';
     this.isLowCutEnabled = true;
     this.isLimiterEnabled = true;
+
+    // Mobile/External Media Router
+    this.streamDestination = null;
+    this.audioElement = null;
   }
 
   async setOutputDevice(deviceId) {
     this.selectedOutputDeviceId = deviceId || '';
-    if (!this.ctx) return;
-    if (typeof this.ctx.setSinkId === 'function') {
+    if (this.audioElement && typeof this.audioElement.setSinkId === 'function') {
+      try {
+        await this.audioElement.setSinkId(this.selectedOutputDeviceId);
+        console.log("AudioElement sink set to:", this.selectedOutputDeviceId || 'default');
+      } catch (err) {
+        console.warn("AudioElement setSinkId failed:", err);
+      }
+    }
+    if (this.ctx && typeof this.ctx.setSinkId === 'function') {
       try {
         await this.ctx.setSinkId(this.selectedOutputDeviceId);
         console.log("AudioContext output sink set to:", this.selectedOutputDeviceId || 'default');
@@ -92,6 +103,13 @@ class AudioManager {
 
   async setupAudioGraph() {
     if (!this.ctx) return;
+
+    // 0. モバイル/外部スピーカー用 MediaStreamDestination & Audio Element
+    this.streamDestination = this.ctx.createMediaStreamDestination();
+    this.audioElement = document.getElementById('audio-output-router');
+    if (this.audioElement) {
+      this.audioElement.srcObject = this.streamDestination.stream;
+    }
 
     // 1. HPF (80Hz ローカットフィルター: ポップノイズ・吹かれ低減)
     this.hpfNode = this.ctx.createBiquadFilter();
@@ -239,6 +257,9 @@ class AudioManager {
 
     this.muteGainNode.connect(this.masterGainNode);
     this.masterGainNode.connect(this.ctx.destination);
+    if (this.streamDestination) {
+      this.masterGainNode.connect(this.streamDestination);
+    }
     this.masterGainNode.connect(this.analyserNode);
   }
 
@@ -283,6 +304,9 @@ class AudioManager {
     if (active) {
       this.muteGainNode.gain.setValueAtTime(this.muteGainNode.gain.value, now);
       this.muteGainNode.gain.linearRampToValueAtTime(1.0, now + 0.03);
+      if (this.audioElement) {
+        this.audioElement.play().catch(e => console.log("audioElement play auto-resume:", e));
+      }
     } else {
       this.muteGainNode.gain.setValueAtTime(this.muteGainNode.gain.value, now);
       this.muteGainNode.gain.linearRampToValueAtTime(0.0, now + 0.03);
@@ -548,6 +572,9 @@ class MicChecker {
 
     this.isPlaying = true;
     if (this.onStateChange) this.onStateChange('playing');
+    if (this.audioManager.audioElement) {
+      this.audioManager.audioElement.play().catch(() => {});
+    }
 
     this.playbackSource.onended = () => {
       this.isPlaying = false;
@@ -795,11 +822,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       
       // 1. 入力マイク
       const audioInputs = devices.filter(d => d.kind === 'audioinput');
-      selectAudioInput.innerHTML = '<option value="">規定のマイク (Default)</option>';
+      selectAudioInput.innerHTML = '<option value="">規定のマイク (内蔵 / 外部自動判別)</option>';
       audioInputs.forEach((device, idx) => {
         const option = document.createElement('option');
         option.value = device.deviceId;
-        option.textContent = device.label || `マイク ${idx + 1}`;
+        option.textContent = device.label ? `${device.label}` : `マイク ${idx + 1}`;
         if (device.deviceId === audioManager.selectedDeviceId) {
           option.selected = true;
         }
@@ -808,19 +835,44 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       // 2. 出力スピーカー / イヤホン
       const audioOutputs = devices.filter(d => d.kind === 'audiooutput');
-      selectAudioOutput.innerHTML = '<option value="">規定のスピーカー (Default)</option>';
-      audioOutputs.forEach((device, idx) => {
+      selectAudioOutput.innerHTML = '';
+      
+      if (audioOutputs.length > 0) {
+        const defaultOpt = document.createElement('option');
+        defaultOpt.value = '';
+        defaultOpt.textContent = '規定のスピーカー (Default)';
+        selectAudioOutput.appendChild(defaultOpt);
+
+        audioOutputs.forEach((device, idx) => {
+          const option = document.createElement('option');
+          option.value = device.deviceId;
+          option.textContent = device.label || `スピーカー ${idx + 1}`;
+          if (device.deviceId === audioManager.selectedOutputDeviceId) {
+            option.selected = true;
+          }
+          selectAudioOutput.appendChild(option);
+        });
+      } else {
+        // iOS Safari / モバイル等で audiooutput 列挙がサポートされない場合
         const option = document.createElement('option');
-        option.value = device.deviceId;
-        option.textContent = device.label || `スピーカー ${idx + 1}`;
-        if (device.deviceId === audioManager.selectedOutputDeviceId) {
-          option.selected = true;
-        }
+        option.value = '';
+        option.textContent = '端末の標準出力 (イヤホン端子 / 外部スピーカー / Bluetooth連動)';
+        option.selected = true;
         selectAudioOutput.appendChild(option);
-      });
+      }
     } catch (e) {
       console.warn("デバイス一覧取得失敗", e);
     }
+  }
+
+  // 外部機器の接続・切断を検知
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', async () => {
+      console.log("Audio device change detected");
+      if (isInitialized) {
+        await populateAudioDevices();
+      }
+    });
   }
 
   btnDeviceSettings.addEventListener('click', async () => {

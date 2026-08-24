@@ -362,7 +362,7 @@
             <span>入力マイク</span>
           </label>
           <select id="select-audio-input" class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500">
-            <option value="">規定のマイク (Default)</option>
+            <option value="">規定のマイク (内蔵 / 外部自動判別)</option>
           </select>
         </div>
 
@@ -373,11 +373,23 @@
             <span>音声出力先 (スピーカー / イヤホン)</span>
           </label>
           <select id="select-audio-output" class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500">
-            <option value="">規定のスピーカー (Default)</option>
+            <option value="">端末の標準出力 (イヤホン端子 / 外部スピーカー / Bluetooth連動)</option>
           </select>
-          <p id="output-sink-note" class="text-[11px] text-slate-400">
-            ※ ブラウザにより直接切り替えが制限される場合はOSの音声設定に従います。
+        </div>
+
+        <!-- スマホ向け外部スピーカー切り替えガイド -->
+        <div class="p-3 bg-blue-50 border border-blue-200 rounded-xl space-y-1.5 text-xs text-blue-900 leading-relaxed">
+          <div class="font-bold flex items-center gap-1 text-blue-700">
+            <i data-lucide="smartphone" class="w-4 h-4"></i>
+            <span>スマートフォンでの外部スピーカー出力について</span>
+          </div>
+          <p class="text-[11px] text-blue-800">
+            iPhone / Androidの仕様上、ブラウザ内からは端末の標準出力（イヤホン端子/Bluetooth）へ音声が送られます。
           </p>
+          <div class="text-[11px] text-slate-700 bg-white/80 p-2 rounded-lg border border-blue-100 space-y-1">
+            <div><strong>・iPhone / iPad:</strong> 画面右上からスワイプして「コントロールセンター」を開き、再生コントロール内の右上のマークからBluetoothや外部スピーカーを選択</div>
+            <div><strong>・Android:</strong> 音量キーを押して「メディア出力先」から外部スピーカーを選択</div>
+          </div>
         </div>
       </div>
 
@@ -388,6 +400,9 @@
       </div>
     </div>
   </div>
+
+  <!-- メディアストリームルーティング用オーディオ要素 (スマホで外部スピーカーへの出力を保証) -->
+  <audio id="audio-output-router" autoplay playsinline style="display:none;"></audio>
 
   <!-- アプリスクリプト -->
   <script type="module" src="app.js"></script>
