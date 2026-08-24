@@ -58,16 +58,24 @@ class AudioManager {
     this.isLowCutEnabled = true;
     this.isLimiterEnabled = true;
 
-    // Mobile/External Media Router
+    // Mobile/External Media Router (Video Hack)
     this.streamDestination = null;
-    this.audioElement = null;
+    this.videoElement = null;
+    this.dummyCanvas = null;
   }
 
-  async kickAudioSession() {
+  async kickAudioSession(isActive = true) {
     if ('audioSession' in navigator) {
       try {
-        navigator.audioSession.type = 'auto';
-        navigator.audioSession.type = 'play-and-record';
+        if (isActive) {
+          navigator.audioSession.type = 'playback';
+          await new Promise(r => setTimeout(r, 40));
+          navigator.audioSession.type = 'play-and-record';
+        } else {
+          navigator.audioSession.type = 'playback';
+          await new Promise(r => setTimeout(r, 40));
+          navigator.audioSession.type = 'auto';
+        }
       } catch (e) {
         console.warn("navigator.audioSession warning:", e);
       }
@@ -76,12 +84,12 @@ class AudioManager {
 
   async setOutputDevice(deviceId) {
     this.selectedOutputDeviceId = deviceId || '';
-    if (this.audioElement && typeof this.audioElement.setSinkId === 'function') {
+    if (this.videoElement && typeof this.videoElement.setSinkId === 'function') {
       try {
-        await this.audioElement.setSinkId(this.selectedOutputDeviceId);
-        console.log("AudioElement sink set to:", this.selectedOutputDeviceId || 'default');
+        await this.videoElement.setSinkId(this.selectedOutputDeviceId);
+        console.log("VideoElement sink set to:", this.selectedOutputDeviceId || 'default');
       } catch (err) {
-        console.warn("AudioElement setSinkId failed:", err);
+        console.warn("VideoElement setSinkId failed:", err);
       }
     }
     if (this.ctx && typeof this.ctx.setSinkId === 'function') {
@@ -95,7 +103,7 @@ class AudioManager {
   }
 
   async init(deviceId = '') {
-    await this.kickAudioSession();
+    await this.kickAudioSession(true);
 
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -117,11 +125,27 @@ class AudioManager {
   async setupAudioGraph() {
     if (!this.ctx) return;
 
-    // 0. モバイル/外部スピーカー用 MediaStreamDestination & Audio Element
+    // 0. モバイル/外部スピーカー用 MediaStreamDestination & Video Element (裏ワザ2)
     this.streamDestination = this.ctx.createMediaStreamDestination();
-    this.audioElement = document.getElementById('audio-output-router');
-    if (this.audioElement) {
-      this.audioElement.srcObject = this.streamDestination.stream;
+    this.videoElement = document.getElementById('video-output-router');
+    this.dummyCanvas = document.getElementById('dummy-video-canvas');
+
+    if (this.videoElement) {
+      if (this.dummyCanvas && typeof this.dummyCanvas.captureStream === 'function') {
+        const dummyCtx = this.dummyCanvas.getContext('2d');
+        dummyCtx.fillStyle = '#000000';
+        dummyCtx.fillRect(0, 0, 16, 16);
+        try {
+          const videoStream = this.dummyCanvas.captureStream(1);
+          const videoTrack = videoStream.getVideoTracks()[0];
+          const audioTrack = this.streamDestination.stream.getAudioTracks()[0];
+          this.videoElement.srcObject = new MediaStream([audioTrack, videoTrack]);
+        } catch (e) {
+          this.videoElement.srcObject = this.streamDestination.stream;
+        }
+      } else {
+        this.videoElement.srcObject = this.streamDestination.stream;
+      }
     }
 
     // 1. HPF (80Hz ローカットフィルター: ポップノイズ・吹かれ低減)
@@ -281,7 +305,7 @@ class AudioManager {
       this.stream.getTracks().forEach(track => track.stop());
     }
 
-    await this.kickAudioSession();
+    await this.kickAudioSession(true);
 
     const constraints = {
       audio: {
@@ -318,16 +342,14 @@ class AudioManager {
     const now = this.ctx.currentTime;
     this.muteGainNode.gain.cancelScheduledValues(now);
     if (active) {
-      this.kickAudioSession();
+      this.kickAudioSession(true);
       this.muteGainNode.gain.setValueAtTime(this.muteGainNode.gain.value, now);
       this.muteGainNode.gain.linearRampToValueAtTime(1.0, now + 0.03);
-      if (this.audioElement) {
-        if (!this.audioElement.srcObject && this.streamDestination) {
-          this.audioElement.srcObject = this.streamDestination.stream;
-        }
-        this.audioElement.play().catch(e => console.log("audioElement play auto-resume:", e));
+      if (this.videoElement) {
+        this.videoElement.play().catch(e => console.log("videoElement play auto-resume:", e));
       }
     } else {
+      this.kickAudioSession(false);
       this.muteGainNode.gain.setValueAtTime(this.muteGainNode.gain.value, now);
       this.muteGainNode.gain.linearRampToValueAtTime(0.0, now + 0.03);
     }
@@ -592,8 +614,8 @@ class MicChecker {
 
     this.isPlaying = true;
     if (this.onStateChange) this.onStateChange('playing');
-    if (this.audioManager.audioElement) {
-      this.audioManager.audioElement.play().catch(() => {});
+    if (this.audioManager.videoElement) {
+      this.audioManager.videoElement.play().catch(() => {});
     }
 
     this.playbackSource.onended = () => {
