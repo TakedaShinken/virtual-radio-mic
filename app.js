@@ -305,7 +305,7 @@ class AudioManager {
       this.stream.getTracks().forEach(track => track.stop());
     }
 
-    await this.kickAudioSession(true);
+    await this.kickAudioSession();
 
     const constraints = {
       audio: {
@@ -963,13 +963,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else {
         mainMicBtn.className = 'w-48 h-48 sm:w-56 sm:h-56 rounded-full border-4 flex flex-col items-center justify-center gap-2 transition-all duration-150 transform scale-102 shadow-lg active cursor-pointer';
         micStatusText.textContent = 'ON AIR';
-        micSubText.textContent = 'タップでミュート';
+        micSubText.textContent = 'タップ または [Space] でミュート';
         micIconWrapper.innerHTML = '<i data-lucide="mic" class="w-8 h-8 sm:w-10 sm:h-10 text-white"></i>';
       }
     } else {
       mainMicBtn.className = 'w-48 h-48 sm:w-56 sm:h-56 rounded-full border-4 flex flex-col items-center justify-center gap-2 transition-all duration-150 transform active:scale-95 shadow-md bg-slate-100 border-slate-300 text-slate-400 cursor-pointer';
       micStatusText.textContent = 'STANDBY';
-      micSubText.textContent = talkMode === 'ptt' ? '長押しで発声 (PTT)' : 'タップしてマイク開始';
+      micSubText.textContent = talkMode === 'ptt' ? '長押し または [Space] 長押しで発声' : 'タップ または [Space] で開始';
       micIconWrapper.innerHTML = '<i data-lucide="mic-off" class="w-8 h-8 sm:w-10 sm:h-10 text-slate-500"></i>';
     }
     if (window.lucide) {
@@ -988,7 +988,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const startPtt = async (e) => {
     if (talkMode !== 'ptt') return;
-    e.preventDefault();
+    if (e) e.preventDefault();
     await ensureAudioReady();
     audioManager.setMicActive(true);
     updateMicButtonUI(true);
@@ -996,7 +996,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const stopPtt = (e) => {
     if (talkMode !== 'ptt') return;
-    e.preventDefault();
+    if (e) e.preventDefault();
     if (audioManager.isMicActive) {
       audioManager.setMicActive(false);
       updateMicButtonUI(false);
@@ -1006,6 +1006,55 @@ document.addEventListener('DOMContentLoaded', async () => {
   mainMicBtn.addEventListener('pointerdown', startPtt);
   window.addEventListener('pointerup', stopPtt);
   window.addEventListener('pointercancel', stopPtt);
+
+  // --- キーボード [Space] キーによる ON/OFF & PTT 制御 ---
+  function isInputFocused() {
+    const activeEl = document.activeElement;
+    if (!activeEl) return false;
+    const tag = activeEl.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || activeEl.isContentEditable;
+  }
+
+  window.addEventListener('keydown', async (e) => {
+    if (e.code === 'Space' || e.key === ' ') {
+      if (isInputFocused()) return;
+      e.preventDefault();
+      if (e.repeat) return;
+
+      await ensureAudioReady();
+
+      if (talkMode === 'toggle') {
+        const nextState = !audioManager.isMicActive;
+        audioManager.setMicActive(nextState);
+        updateMicButtonUI(nextState);
+      } else if (talkMode === 'ptt') {
+        if (!audioManager.isMicActive) {
+          audioManager.setMicActive(true);
+          updateMicButtonUI(true);
+        }
+      }
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space' || e.key === ' ') {
+      if (isInputFocused()) return;
+      if (talkMode === 'ptt') {
+        e.preventDefault();
+        if (audioManager.isMicActive) {
+          audioManager.setMicActive(false);
+          updateMicButtonUI(false);
+        }
+      }
+    }
+  });
+
+  window.addEventListener('blur', () => {
+    if (talkMode === 'ptt' && audioManager.isMicActive) {
+      audioManager.setMicActive(false);
+      updateMicButtonUI(false);
+    }
+  });
 
   // --- FX ボタンイベント ---
   const bindFXButton = (btn, fxName) => {
