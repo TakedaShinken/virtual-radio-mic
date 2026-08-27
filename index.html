@@ -85,7 +85,7 @@
             <i data-lucide="mic-off" class="w-8 h-8 sm:w-10 sm:h-10"></i>
           </div>
           <span id="mic-status-text" class="text-lg sm:text-xl font-black tracking-wide text-slate-600">STANDBY</span>
-          <span id="mic-sub-text" class="text-xs text-slate-500 font-semibold">タップしてマイク開始</span>
+          <span id="mic-sub-text" class="text-xs text-slate-500 font-semibold">タップ または [Space] で開始</span>
         </button>
 
         <!-- VU メーター -->
@@ -401,8 +401,9 @@
     </div>
   </div>
 
-  <!-- メディアストリームルーティング用オーディオ要素 (スマホで外部スピーカーへの出力を保証) -->
-  <audio id="audio-output-router" autoplay playsinline style="display:none;"></audio>
+  <!-- メディアストリームルーティング用ビデオ要素 (裏ワザ2: iOSで動画再生と誤認させBluetooth A2DP/スピーカー出力を促す) -->
+  <video id="video-output-router" autoplay playsinline style="display:none; width:1px; height:1px;"></video>
+  <canvas id="dummy-video-canvas" width="16" height="16" style="display:none;"></canvas>
 
   <!-- アプリスクリプト -->
   <script type="module" src="app.js"></script>

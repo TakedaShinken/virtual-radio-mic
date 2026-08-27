@@ -58,16 +58,24 @@ class AudioManager {
     this.isLowCutEnabled = true;
     this.isLimiterEnabled = true;
 
-    // Mobile/External Media Router
+    // Mobile/External Media Router (Video Hack)
     this.streamDestination = null;
-    this.audioElement = null;
+    this.videoElement = null;
+    this.dummyCanvas = null;
   }
 
-  async kickAudioSession() {
+  async kickAudioSession(isActive = true) {
     if ('audioSession' in navigator) {
       try {
-        navigator.audioSession.type = 'auto';
-        navigator.audioSession.type = 'play-and-record';
+        if (isActive) {
+          navigator.audioSession.type = 'playback';
+          await new Promise(r => setTimeout(r, 40));
+          navigator.audioSession.type = 'play-and-record';
+        } else {
+          navigator.audioSession.type = 'playback';
+          await new Promise(r => setTimeout(r, 40));
+          navigator.audioSession.type = 'auto';
+        }
       } catch (e) {
         console.warn("navigator.audioSession warning:", e);
       }
@@ -76,12 +84,12 @@ class AudioManager {
 
   async setOutputDevice(deviceId) {
     this.selectedOutputDeviceId = deviceId || '';
-    if (this.audioElement && typeof this.audioElement.setSinkId === 'function') {
+    if (this.videoElement && typeof this.videoElement.setSinkId === 'function') {
       try {
-        await this.audioElement.setSinkId(this.selectedOutputDeviceId);
-        console.log("AudioElement sink set to:", this.selectedOutputDeviceId || 'default');
+        await this.videoElement.setSinkId(this.selectedOutputDeviceId);
+        console.log("VideoElement sink set to:", this.selectedOutputDeviceId || 'default');
       } catch (err) {
-        console.warn("AudioElement setSinkId failed:", err);
+        console.warn("VideoElement setSinkId failed:", err);
       }
     }
     if (this.ctx && typeof this.ctx.setSinkId === 'function') {
@@ -95,7 +103,7 @@ class AudioManager {
   }
 
   async init(deviceId = '') {
-    await this.kickAudioSession();
+    await this.kickAudioSession(true);
 
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -117,11 +125,27 @@ class AudioManager {
   async setupAudioGraph() {
     if (!this.ctx) return;
 
-    // 0. モバイル/外部スピーカー用 MediaStreamDestination & Audio Element
+    // 0. モバイル/外部スピーカー用 MediaStreamDestination & Video Element (裏ワザ2)
     this.streamDestination = this.ctx.createMediaStreamDestination();
-    this.audioElement = document.getElementById('audio-output-router');
-    if (this.audioElement) {
-      this.audioElement.srcObject = this.streamDestination.stream;
+    this.videoElement = document.getElementById('video-output-router');
+    this.dummyCanvas = document.getElementById('dummy-video-canvas');
+
+    if (this.videoElement) {
+      if (this.dummyCanvas && typeof this.dummyCanvas.captureStream === 'function') {
+        const dummyCtx = this.dummyCanvas.getContext('2d');
+        dummyCtx.fillStyle = '#000000';
+        dummyCtx.fillRect(0, 0, 16, 16);
+        try {
+          const videoStream = this.dummyCanvas.captureStream(1);
+          const videoTrack = videoStream.getVideoTracks()[0];
+          const audioTrack = this.streamDestination.stream.getAudioTracks()[0];
+          this.videoElement.srcObject = new MediaStream([audioTrack, videoTrack]);
+        } catch (e) {
+          this.videoElement.srcObject = this.streamDestination.stream;
+        }
+      } else {
+        this.videoElement.srcObject = this.streamDestination.stream;
+      }
     }
 
     // 1. HPF (80Hz ローカットフィルター: ポップノイズ・吹かれ低減)
@@ -318,16 +342,14 @@ class AudioManager {
     const now = this.ctx.currentTime;
     this.muteGainNode.gain.cancelScheduledValues(now);
     if (active) {
-      this.kickAudioSession();
+      this.kickAudioSession(true);
       this.muteGainNode.gain.setValueAtTime(this.muteGainNode.gain.value, now);
       this.muteGainNode.gain.linearRampToValueAtTime(1.0, now + 0.03);
-      if (this.audioElement) {
-        if (!this.audioElement.srcObject && this.streamDestination) {
-          this.audioElement.srcObject = this.streamDestination.stream;
-        }
-        this.audioElement.play().catch(e => console.log("audioElement play auto-resume:", e));
+      if (this.videoElement) {
+        this.videoElement.play().catch(e => console.log("videoElement play auto-resume:", e));
       }
     } else {
+      this.kickAudioSession(false);
       this.muteGainNode.gain.setValueAtTime(this.muteGainNode.gain.value, now);
       this.muteGainNode.gain.linearRampToValueAtTime(0.0, now + 0.03);
     }
@@ -592,8 +614,8 @@ class MicChecker {
 
     this.isPlaying = true;
     if (this.onStateChange) this.onStateChange('playing');
-    if (this.audioManager.audioElement) {
-      this.audioManager.audioElement.play().catch(() => {});
+    if (this.audioManager.videoElement) {
+      this.audioManager.videoElement.play().catch(() => {});
     }
 
     this.playbackSource.onended = () => {
@@ -941,13 +963,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       } else {
         mainMicBtn.className = 'w-48 h-48 sm:w-56 sm:h-56 rounded-full border-4 flex flex-col items-center justify-center gap-2 transition-all duration-150 transform scale-102 shadow-lg active cursor-pointer';
         micStatusText.textContent = 'ON AIR';
-        micSubText.textContent = 'タップでミュート';
+        micSubText.textContent = 'タップ または [Space] でミュート';
         micIconWrapper.innerHTML = '<i data-lucide="mic" class="w-8 h-8 sm:w-10 sm:h-10 text-white"></i>';
       }
     } else {
       mainMicBtn.className = 'w-48 h-48 sm:w-56 sm:h-56 rounded-full border-4 flex flex-col items-center justify-center gap-2 transition-all duration-150 transform active:scale-95 shadow-md bg-slate-100 border-slate-300 text-slate-400 cursor-pointer';
       micStatusText.textContent = 'STANDBY';
-      micSubText.textContent = talkMode === 'ptt' ? '長押しで発声 (PTT)' : 'タップしてマイク開始';
+      micSubText.textContent = talkMode === 'ptt' ? '長押し または [Space] 長押しで発声' : 'タップ または [Space] で開始';
       micIconWrapper.innerHTML = '<i data-lucide="mic-off" class="w-8 h-8 sm:w-10 sm:h-10 text-slate-500"></i>';
     }
     if (window.lucide) {
@@ -966,7 +988,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const startPtt = async (e) => {
     if (talkMode !== 'ptt') return;
-    e.preventDefault();
+    if (e) e.preventDefault();
     await ensureAudioReady();
     audioManager.setMicActive(true);
     updateMicButtonUI(true);
@@ -974,7 +996,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const stopPtt = (e) => {
     if (talkMode !== 'ptt') return;
-    e.preventDefault();
+    if (e) e.preventDefault();
     if (audioManager.isMicActive) {
       audioManager.setMicActive(false);
       updateMicButtonUI(false);
@@ -984,6 +1006,55 @@ document.addEventListener('DOMContentLoaded', async () => {
   mainMicBtn.addEventListener('pointerdown', startPtt);
   window.addEventListener('pointerup', stopPtt);
   window.addEventListener('pointercancel', stopPtt);
+
+  // --- キーボード [Space] キーによる ON/OFF & PTT 制御 ---
+  function isInputFocused() {
+    const activeEl = document.activeElement;
+    if (!activeEl) return false;
+    const tag = activeEl.tagName.toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || activeEl.isContentEditable;
+  }
+
+  window.addEventListener('keydown', async (e) => {
+    if (e.code === 'Space' || e.key === ' ') {
+      if (isInputFocused()) return;
+      e.preventDefault();
+      if (e.repeat) return;
+
+      await ensureAudioReady();
+
+      if (talkMode === 'toggle') {
+        const nextState = !audioManager.isMicActive;
+        audioManager.setMicActive(nextState);
+        updateMicButtonUI(nextState);
+      } else if (talkMode === 'ptt') {
+        if (!audioManager.isMicActive) {
+          audioManager.setMicActive(true);
+          updateMicButtonUI(true);
+        }
+      }
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'Space' || e.key === ' ') {
+      if (isInputFocused()) return;
+      if (talkMode === 'ptt') {
+        e.preventDefault();
+        if (audioManager.isMicActive) {
+          audioManager.setMicActive(false);
+          updateMicButtonUI(false);
+        }
+      }
+    }
+  });
+
+  window.addEventListener('blur', () => {
+    if (talkMode === 'ptt' && audioManager.isMicActive) {
+      audioManager.setMicActive(false);
+      updateMicButtonUI(false);
+    }
+  });
 
   // --- FX ボタンイベント ---
   const bindFXButton = (btn, fxName) => {
