@@ -3,6 +3,18 @@
  * クライアントサイド Web Audio API による低遅延擬似スピーカー＆ラジオFXミキサー
  */
 
+/**
+ * 声をクリアに（全指向性マイク向け 雑音・残響カット）の強さプリセット
+ * hpfHz / mudDb / lpfHz はネイティブ BiquadFilter、それ以外は voice-focus-worklet.js が使う
+ *   margin / gateRange / holdMs / releaseMs: 適応ノイズゲート
+ *   low* / high* / tailDeadband / bandReleaseMs: 残響テール抑制 (子音を守るため高域は控えめ)
+ */
+const VOICE_FOCUS_PRESETS = {
+  light:    { hpfHz: 100, mudDb: -2,   lpfHz: 10000, margin: 7,  gateRange: 10, holdMs: 220, releaseMs: 160, lowSlope: 1.5, lowFloor: -8,  highSlope: 0.3, highFloor: -2, tailDeadband: 2.5, bandReleaseMs: 15 },
+  standard: { hpfHz: 120, mudDb: -3,   lpfHz: 8000,  margin: 9,  gateRange: 18, holdMs: 150, releaseMs: 120, lowSlope: 3.0, lowFloor: -14, highSlope: 0.4, highFloor: -3, tailDeadband: 1.5, bandReleaseMs: 15 },
+  strong:   { hpfHz: 150, mudDb: -4.5, lpfHz: 7000,  margin: 11, gateRange: 26, holdMs: 110, releaseMs: 90,  lowSlope: 4.0, lowFloor: -18, highSlope: 0.6, highFloor: -5, tailDeadband: 1,   bandReleaseMs: 15 }
+};
+
 class AudioManager {
   constructor() {
     this.ctx = null;
@@ -10,6 +22,10 @@ class AudioManager {
     this.sourceNode = null;
     
     // Core Nodes
+    this.channelSplitterNode = null;
+    this.ch1GainNode = null;
+    this.ch2GainNode = null;
+    this.inputBus = null;
     this.hpfNode = null;
     this.micGainNode = null;
     this.eqLowNode = null;
@@ -55,10 +71,30 @@ class AudioManager {
     this.isMicActive = false;
     this.selectedDeviceId = '';
     this.selectedOutputDeviceId = '';
+    this.micChannelMode = 'ch1'; // 'ch1' (Left / 規定) | 'ch2' (Right) | 'mix' (L+R)
     this.isLowCutEnabled = true;
     this.isLimiterEnabled = true;
+    this.fxDisconnectTimers = {};
 
-    // Mobile/External Media Router (Video Hack)
+    // 声をクリアに（全指向性マイク向け 雑音・残響カット）
+    this.voiceHpfNode = null;
+    this.voiceMudNode = null;
+    this.voiceLpfNode = null;
+    this.voiceFocusNode = null; // AudioWorkletNode (非対応ブラウザでは null → EQ のみの簡易モード)
+    this.voiceOutputNode = null; // 処理済みの声 (Dry / FX / マイクチェックの分岐点)
+    this.voiceChain = [];
+    this.voiceSwitchTimer = null;
+    this.voiceFocusLevel = 'standard'; // 'off' | 'light' | 'standard' | 'strong'
+    this.useNativeNoiseSuppression = true;
+    this.nativeNoiseSuppressionSupported = false;
+    this.nativeNoiseSuppressionActive = false;
+    this.onVoiceFocusMeter = null;
+
+    // 出力方式: 'context' (Web Audio 直接・低遅延) | 'media' (video 要素経由の互換モード)
+    this.outputRoute = 'context';
+    this.links = {};
+
+    // Mobile/External Media Router (Video Hack) — 互換モード選択時のみ生成
     this.streamDestination = null;
     this.videoElement = null;
     this.dummyCanvas = null;
@@ -102,15 +138,44 @@ class AudioManager {
     }
   }
 
+  setMicChannelMode(mode) {
+    this.micChannelMode = mode || 'ch1';
+    if (!this.ch1GainNode || !this.ch2GainNode || !this.ctx) return;
+    const now = this.ctx.currentTime;
+    this.ch1GainNode.gain.cancelScheduledValues(now);
+    this.ch2GainNode.gain.cancelScheduledValues(now);
+
+    if (this.micChannelMode === 'ch2') {
+      this.ch1GainNode.gain.setValueAtTime(this.ch1GainNode.gain.value, now);
+      this.ch1GainNode.gain.linearRampToValueAtTime(0.0, now + 0.02);
+      this.ch2GainNode.gain.setValueAtTime(this.ch2GainNode.gain.value, now);
+      this.ch2GainNode.gain.linearRampToValueAtTime(1.0, now + 0.02);
+    } else if (this.micChannelMode === 'mix') {
+      this.ch1GainNode.gain.setValueAtTime(this.ch1GainNode.gain.value, now);
+      this.ch1GainNode.gain.linearRampToValueAtTime(0.707, now + 0.02);
+      this.ch2GainNode.gain.setValueAtTime(this.ch2GainNode.gain.value, now);
+      this.ch2GainNode.gain.linearRampToValueAtTime(0.707, now + 0.02);
+    } else {
+      // Default: 'ch1' (Left / チャンネル1: 有線イヤホン・通常マイク)
+      this.ch1GainNode.gain.setValueAtTime(this.ch1GainNode.gain.value, now);
+      this.ch1GainNode.gain.linearRampToValueAtTime(1.0, now + 0.02);
+      this.ch2GainNode.gain.setValueAtTime(this.ch2GainNode.gain.value, now);
+      this.ch2GainNode.gain.linearRampToValueAtTime(0.0, now + 0.02);
+    }
+  }
+
   async init(deviceId = '') {
     await this.kickAudioSession(true);
 
     if (!this.ctx) {
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new AudioContextClass({
-        latencyHint: 'interactive',
-        sampleRate: 48000
-      });
+      // sampleRate は指定しない: 端末本来のレートで動かし、リサンプリング負荷と
+      // Firefox の「サンプルレートの異なる MediaStream を接続できない」エラーを避ける
+      try {
+        this.ctx = new AudioContextClass({ latencyHint: 'interactive' });
+      } catch (e) {
+        this.ctx = new AudioContextClass();
+      }
     }
 
     if (this.ctx.state === 'suspended') {
@@ -118,52 +183,85 @@ class AudioManager {
     }
 
     this.selectedDeviceId = deviceId;
-    await this.setupAudioGraph();
+    if (!this.inputBus) {
+      await this.setupAudioGraph();
+    }
     await this.connectMicrophone();
   }
 
   async setupAudioGraph() {
     if (!this.ctx) return;
 
-    // 0. モバイル/外部スピーカー用 MediaStreamDestination & Video Element (裏ワザ2)
-    this.streamDestination = this.ctx.createMediaStreamDestination();
-    this.videoElement = document.getElementById('video-output-router');
-    this.dummyCanvas = document.getElementById('dummy-video-canvas');
+    // 0.5. 入力チャンネルルーター (有線イヤホン・モノラルマイク両耳ステレオ出力対応)
+    this.channelSplitterNode = this.ctx.createChannelSplitter(2);
+    this.ch1GainNode = this.ctx.createGain();
+    this.ch2GainNode = this.ctx.createGain();
+    this.inputBus = this.ctx.createGain();
+    this.inputBus.channelCount = 1;
+    this.inputBus.channelCountMode = 'explicit';
+    this.inputBus.channelInterpretation = 'speakers';
 
-    if (this.videoElement) {
-      if (this.dummyCanvas && typeof this.dummyCanvas.captureStream === 'function') {
-        const dummyCtx = this.dummyCanvas.getContext('2d');
-        dummyCtx.fillStyle = '#000000';
-        dummyCtx.fillRect(0, 0, 16, 16);
-        try {
-          const videoStream = this.dummyCanvas.captureStream(1);
-          const videoTrack = videoStream.getVideoTracks()[0];
-          const audioTrack = this.streamDestination.stream.getAudioTracks()[0];
-          this.videoElement.srcObject = new MediaStream([audioTrack, videoTrack]);
-        } catch (e) {
-          this.videoElement.srcObject = this.streamDestination.stream;
-        }
-      } else {
-        this.videoElement.srcObject = this.streamDestination.stream;
-      }
-    }
+    this.channelSplitterNode.connect(this.ch1GainNode, 0);
+    this.channelSplitterNode.connect(this.ch2GainNode, 1);
+    this.ch1GainNode.connect(this.inputBus);
+    this.ch2GainNode.connect(this.inputBus);
+    this.setMicChannelMode(this.micChannelMode);
 
     // 1. HPF (80Hz ローカットフィルター: ポップノイズ・吹かれ低減)
     this.hpfNode = this.ctx.createBiquadFilter();
     this.hpfNode.type = 'highpass';
     this.hpfNode.frequency.value = 80;
     this.hpfNode.Q.value = 0.707;
+    this.hpfNode.channelCount = 1;
+    this.hpfNode.channelCountMode = 'explicit';
 
     // 2. マイク入力ゲイン (0.0 - 3.0)
     this.micGainNode = this.ctx.createGain();
     this.micGainNode.gain.value = 1.0;
+    this.micGainNode.channelCount = 1;
+    this.micGainNode.channelCountMode = 'explicit';
+
+    // 2.5. 声をクリアに（全指向性マイク向け 雑音・残響カット）
+    //   ネイティブ EQ: 低域の響きと吹かれ / 300Hz 付近のこもり / 高域のヒスを削る (ハウリングを招くブーストはしない)
+    //   AudioWorklet: 適応ノイズゲート + 残響テール抑制 (voice-focus-worklet.js)
+    const preset = VOICE_FOCUS_PRESETS[this.voiceFocusLevel] || VOICE_FOCUS_PRESETS.standard;
+    this.voiceHpfNode = this.ctx.createBiquadFilter();
+    this.voiceHpfNode.type = 'highpass';
+    this.voiceHpfNode.frequency.value = preset.hpfHz;
+    this.voiceHpfNode.Q.value = 0.707;
+
+    this.voiceMudNode = this.ctx.createBiquadFilter();
+    this.voiceMudNode.type = 'peaking';
+    this.voiceMudNode.frequency.value = 300;
+    this.voiceMudNode.Q.value = 1.0;
+    this.voiceMudNode.gain.value = preset.mudDb;
+
+    this.voiceLpfNode = this.ctx.createBiquadFilter();
+    this.voiceLpfNode.type = 'lowpass';
+    this.voiceLpfNode.frequency.value = preset.lpfHz;
+    this.voiceLpfNode.Q.value = 0.707;
+
+    this.voiceOutputNode = this.ctx.createGain();
+    this.voiceOutputNode.gain.value = 1.0;
+
+    [this.voiceHpfNode, this.voiceMudNode, this.voiceLpfNode, this.voiceOutputNode].forEach(node => {
+      node.channelCount = 1;
+      node.channelCountMode = 'explicit';
+    });
+
+    await this.loadVoiceFocusWorklet(preset);
 
     // 3. FX ミキサーバス & Dry Gain
     this.dryGainNode = this.ctx.createGain();
     this.dryGainNode.gain.value = 1.0;
+    this.dryGainNode.channelCount = 1;
+    this.dryGainNode.channelCountMode = 'explicit';
 
     this.fxMixBus = this.ctx.createGain();
     this.fxMixBus.gain.value = 1.0;
+    this.fxMixBus.channelCount = 2;
+    this.fxMixBus.channelCountMode = 'explicit';
+    this.fxMixBus.channelInterpretation = 'speakers';
 
     // --- FX 1: エコー (Echo / Delay) ---
     this.echoDelayNode = this.ctx.createDelay(1.0);
@@ -259,6 +357,9 @@ class AudioManager {
     // 7. マスター音量
     this.masterGainNode = this.ctx.createGain();
     this.masterGainNode.gain.value = 1.0;
+    this.masterGainNode.channelCount = 2;
+    this.masterGainNode.channelCountMode = 'explicit';
+    this.masterGainNode.channelInterpretation = 'speakers';
 
     // 8. アナライザー (VUメーター)
     this.analyserNode = this.ctx.createAnalyser();
@@ -270,14 +371,26 @@ class AudioManager {
   }
 
   connectPipeline() {
-    if (!this.ctx || !this.micGainNode) return;
+    if (!this.ctx || !this.inputBus || !this.micGainNode) return;
 
-    // MicGain -> Dry + 各FX入力
-    this.micGainNode.connect(this.dryGainNode);
-    this.micGainNode.connect(this.echoDelayNode);
-    this.micGainNode.connect(this.radioFilterNode);
-    this.micGainNode.connect(this.robotModGainNode);
-    this.micGainNode.connect(this.reverbNode);
+    // inputBus -> HPF / MicGain
+    this.inputBus.disconnect();
+    if (this.isLowCutEnabled && this.hpfNode) {
+      this.inputBus.connect(this.hpfNode);
+      this.hpfNode.disconnect();
+      this.hpfNode.connect(this.micGainNode);
+    } else {
+      this.inputBus.connect(this.micGainNode);
+    }
+
+    // MicGain -> [声をクリアに] -> voiceOutputNode
+    this.rewireVoiceChain();
+
+    // voiceOutputNode -> Dry + 有効な FX 入力 (OFF の FX は切り離して CPU を使わせない)
+    this.voiceOutputNode.connect(this.dryGainNode);
+    Object.keys(this.fxState).forEach(fxName => {
+      this.setFxInputConnected(fxName, this.fxState[fxName]);
+    });
 
     // FXMixBus -> EQLow -> EQMid -> EQHigh
     this.fxMixBus.connect(this.eqLowNode);
@@ -293,11 +406,206 @@ class AudioManager {
     }
 
     this.muteGainNode.connect(this.masterGainNode);
-    this.masterGainNode.connect(this.ctx.destination);
-    if (this.streamDestination) {
-      this.masterGainNode.connect(this.streamDestination);
+    // 出力先は常に 1 経路だけ (2 経路から同時に鳴らすと遅延差で声が二重になり、響いて聞こえる)
+    if (this.outputRoute === 'media') {
+      this.ensureMediaRouter();
     }
+    this.updateOutputLinks();
     this.masterGainNode.connect(this.analyserNode);
+  }
+
+  async loadVoiceFocusWorklet(preset) {
+    if (!this.ctx || this.voiceFocusNode) return;
+    if (!this.ctx.audioWorklet || typeof AudioWorkletNode === 'undefined') {
+      console.warn("AudioWorklet 非対応: 声をクリアに は EQ のみの簡易モードで動作します");
+      return;
+    }
+    try {
+      // 一部の端末で addModule が返ってこなくても、アプリ全体を止めずに簡易モードで起動する
+      let timer = null;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('addModule timeout')), 5000);
+      });
+      try {
+        await Promise.race([
+          this.ctx.audioWorklet.addModule(new URL('./voice-focus-worklet.js', import.meta.url).href),
+          timeout
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
+      this.voiceFocusNode = new AudioWorkletNode(this.ctx, 'voice-focus-processor', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
+        channelCount: 1,
+        channelCountMode: 'explicit',
+        processorOptions: { config: preset }
+      });
+      this.voiceFocusNode.port.onmessage = (e) => {
+        if (e.data && e.data.type === 'meter' && this.onVoiceFocusMeter) {
+          this.onVoiceFocusMeter(e.data);
+        }
+      };
+    } catch (err) {
+      console.warn("Voice Focus worklet の読み込みに失敗 (EQ のみの簡易モードで動作):", err);
+      this.voiceFocusNode = null;
+    }
+  }
+
+  rewireVoiceChain() {
+    if (!this.micGainNode || !this.voiceOutputNode) return;
+    // 自分で張った接続だけを外す (並列タップを巻き込まない)
+    for (let i = 0; i < this.voiceChain.length - 1; i++) {
+      try { this.voiceChain[i].disconnect(this.voiceChain[i + 1]); } catch (e) {}
+    }
+    const chain = [this.micGainNode];
+    if (this.voiceFocusLevel !== 'off') {
+      chain.push(this.voiceHpfNode, this.voiceMudNode, this.voiceLpfNode);
+      if (this.voiceFocusNode) chain.push(this.voiceFocusNode);
+    }
+    chain.push(this.voiceOutputNode);
+    for (let i = 0; i < chain.length - 1; i++) {
+      chain[i].connect(chain[i + 1]);
+    }
+    this.voiceChain = chain;
+  }
+
+  setVoiceFocusLevel(level) {
+    const next = VOICE_FOCUS_PRESETS[level] ? level : 'off';
+    const wasOn = this.voiceFocusLevel !== 'off';
+    this.voiceFocusLevel = next;
+    if (!this.ctx || !this.voiceOutputNode) return;
+
+    const preset = VOICE_FOCUS_PRESETS[next];
+    if (preset) {
+      const now = this.ctx.currentTime;
+      this.voiceHpfNode.frequency.setTargetAtTime(preset.hpfHz, now, 0.02);
+      this.voiceMudNode.gain.setTargetAtTime(preset.mudDb, now, 0.02);
+      this.voiceLpfNode.frequency.setTargetAtTime(preset.lpfHz, now, 0.02);
+      if (this.voiceFocusNode) {
+        // OFF から戻した時は古い推定値を捨てて追従し直す
+        this.voiceFocusNode.port.postMessage({ type: 'config', config: preset, reset: !wasOn });
+      }
+    }
+    if (wasOn !== (next !== 'off')) {
+      this.switchVoiceChainSmoothly();
+    }
+  }
+
+  // ON AIR 中の繋ぎ替えで「プツッ」と鳴らないよう、一瞬フェードしてから繋ぎ替える
+  switchVoiceChainSmoothly() {
+    const out = this.voiceOutputNode;
+    if (!this.isMicActive || this.ctx.state !== 'running') {
+      this.rewireVoiceChain();
+      return;
+    }
+    const now = this.ctx.currentTime;
+    out.gain.cancelScheduledValues(now);
+    out.gain.setValueAtTime(out.gain.value, now);
+    out.gain.linearRampToValueAtTime(0.0, now + 0.015);
+    clearTimeout(this.voiceSwitchTimer);
+    this.voiceSwitchTimer = setTimeout(() => {
+      this.rewireVoiceChain();
+      const t = this.ctx.currentTime;
+      out.gain.cancelScheduledValues(t);
+      out.gain.setValueAtTime(0.0, t);
+      out.gain.linearRampToValueAtTime(1.0, t + 0.015);
+    }, 30);
+  }
+
+  async setNativeNoiseSuppression(enabled) {
+    this.useNativeNoiseSuppression = !!enabled;
+    // ブラウザ側の音声処理は getUserMedia を取り直さないと確実には切り替わらない
+    if (this.stream && this.ctx) {
+      await this.connectMicrophone();
+    }
+  }
+
+  setFxInputConnected(fxName, connected) {
+    const inputs = {
+      echo: this.echoDelayNode,
+      radio: this.radioFilterNode,
+      robot: this.robotModGainNode,
+      reverb: this.reverbNode
+    };
+    this.linkNode(this.voiceOutputNode, inputs[fxName], connected, `fx:${fxName}`);
+  }
+
+  setOutputRoute(route) {
+    this.outputRoute = route === 'media' ? 'media' : 'context';
+    if (!this.ctx || !this.masterGainNode) return;
+    if (this.outputRoute === 'media') {
+      this.ensureMediaRouter();
+      this.playMediaRouter();
+    } else if (this.videoElement) {
+      this.videoElement.pause();
+    }
+    this.updateOutputLinks();
+  }
+
+  // 互換モード: MediaStreamDestination を video 要素で再生 (裏ワザ2: iOS で動画再生と誤認させ外部出力を促す)
+  ensureMediaRouter() {
+    if (this.streamDestination) return true;
+    if (!this.ctx || typeof this.ctx.createMediaStreamDestination !== 'function') return false;
+    const videoElement = document.getElementById('video-output-router');
+    if (!videoElement) return false;
+
+    this.streamDestination = this.ctx.createMediaStreamDestination();
+    this.videoElement = videoElement;
+    this.dummyCanvas = document.getElementById('dummy-video-canvas');
+
+    if (this.dummyCanvas && typeof this.dummyCanvas.captureStream === 'function') {
+      const dummyCtx = this.dummyCanvas.getContext('2d');
+      dummyCtx.fillStyle = '#000000';
+      dummyCtx.fillRect(0, 0, 16, 16);
+      try {
+        const videoStream = this.dummyCanvas.captureStream(1);
+        const videoTrack = videoStream.getVideoTracks()[0];
+        const audioTrack = this.streamDestination.stream.getAudioTracks()[0];
+        this.videoElement.srcObject = new MediaStream([audioTrack, videoTrack]);
+      } catch (e) {
+        this.videoElement.srcObject = this.streamDestination.stream;
+      }
+    } else {
+      this.videoElement.srcObject = this.streamDestination.stream;
+    }
+
+    // video 要素が実際に鳴っている間だけ AudioContext 側の出力を止める (無音と二重再生の両方を防ぐ)
+    ['playing', 'pause', 'ended', 'emptied', 'error'].forEach(type => {
+      this.videoElement.addEventListener(type, () => this.updateOutputLinks());
+    });
+    if (this.selectedOutputDeviceId && typeof this.videoElement.setSinkId === 'function') {
+      this.videoElement.setSinkId(this.selectedOutputDeviceId).catch(err => {
+        console.warn("VideoElement setSinkId failed:", err);
+      });
+    }
+    return true;
+  }
+
+  playMediaRouter() {
+    if (this.outputRoute !== 'media' || !this.videoElement) return;
+    this.videoElement.play().catch(e => console.log("videoElement play auto-resume:", e));
+  }
+
+  updateOutputLinks() {
+    if (!this.ctx || !this.masterGainNode) return;
+    const useMedia = this.outputRoute === 'media' && !!this.streamDestination && !!this.videoElement;
+    this.linkNode(this.masterGainNode, this.streamDestination, useMedia, 'mediaRoute');
+    const mediaAudible = useMedia && !this.videoElement.paused && !this.videoElement.ended &&
+      this.videoElement.readyState >= 2;
+    this.linkNode(this.masterGainNode, this.ctx.destination, !mediaAudible, 'contextRoute');
+  }
+
+  linkNode(source, destination, shouldLink, key) {
+    if (!source || !destination) return;
+    if (shouldLink && !this.links[key]) {
+      source.connect(destination);
+      this.links[key] = true;
+    } else if (!shouldLink && this.links[key]) {
+      try { source.disconnect(destination); } catch (e) {}
+      this.links[key] = false;
+    }
   }
 
   async connectMicrophone() {
@@ -307,28 +615,36 @@ class AudioManager {
 
     await this.kickAudioSession();
 
+    const mediaDevices = navigator.mediaDevices;
+    const supported = typeof mediaDevices.getSupportedConstraints === 'function'
+      ? mediaDevices.getSupportedConstraints()
+      : {};
+    this.nativeNoiseSuppressionSupported = !!supported.noiseSuppression;
+
     const constraints = {
       audio: {
         deviceId: this.selectedDeviceId ? { exact: this.selectedDeviceId } : undefined,
+        // エコーキャンセラは PA 用途だとスピーカーから戻る自分の声を消そうとして声が途切れるため OFF
         echoCancellation: false,
-        noiseSuppression: false,
+        // ブラウザ内蔵ノイズ抑制 (ネイティブ実装なので軽い。非対応ブラウザでは無視される)
+        noiseSuppression: this.useNativeNoiseSuppression,
+        // 自動ゲインは話していない間に雑音と残響を持ち上げるため OFF
         autoGainControl: false,
-        channelCount: { ideal: 1 },
-        sampleRate: { ideal: 48000 }
+        channelCount: { ideal: 1 }
       }
     };
 
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+      this.stream = await mediaDevices.getUserMedia(constraints);
+      const track = typeof this.stream.getAudioTracks === 'function' ? this.stream.getAudioTracks()[0] : null;
+      const settings = track && typeof track.getSettings === 'function' ? track.getSettings() : {};
+      this.nativeNoiseSuppressionActive = settings.noiseSuppression === true;
       if (this.sourceNode) {
         this.sourceNode.disconnect();
       }
       this.sourceNode = this.ctx.createMediaStreamSource(this.stream);
-      if (this.isLowCutEnabled) {
-        this.sourceNode.connect(this.hpfNode);
-        this.hpfNode.connect(this.micGainNode);
-      } else {
-        this.sourceNode.connect(this.micGainNode);
+      if (this.channelSplitterNode) {
+        this.sourceNode.connect(this.channelSplitterNode);
       }
     } catch (err) {
       console.error("マイク接続エラー:", err);
@@ -345,9 +661,7 @@ class AudioManager {
       this.kickAudioSession(true);
       this.muteGainNode.gain.setValueAtTime(this.muteGainNode.gain.value, now);
       this.muteGainNode.gain.linearRampToValueAtTime(1.0, now + 0.03);
-      if (this.videoElement) {
-        this.videoElement.play().catch(e => console.log("videoElement play auto-resume:", e));
-      }
+      this.playMediaRouter();
     } else {
       this.kickAudioSession(false);
       this.muteGainNode.gain.setValueAtTime(this.muteGainNode.gain.value, now);
@@ -377,6 +691,16 @@ class AudioManager {
     this.fxState[fxName] = !this.fxState[fxName];
     const now = this.ctx.currentTime;
     const active = this.fxState[fxName];
+
+    // OFF の FX は入力ごと切り離して処理を止める (特にスタジオ残響のコンボルバーは重い)
+    clearTimeout(this.fxDisconnectTimers[fxName]);
+    if (active) {
+      this.setFxInputConnected(fxName, true);
+    } else {
+      this.fxDisconnectTimers[fxName] = setTimeout(() => {
+        if (!this.fxState[fxName]) this.setFxInputConnected(fxName, false);
+      }, 80);
+    }
 
     switch (fxName) {
       case 'echo':
@@ -440,22 +764,35 @@ class AudioManager {
 
   setLowCut(enabled) {
     this.isLowCutEnabled = enabled;
-    if (this.sourceNode) {
-      this.sourceNode.disconnect();
-      if (enabled) {
-        this.sourceNode.connect(this.hpfNode);
+    if (this.inputBus && this.micGainNode) {
+      if (this.hpfNode) {
+        try { this.inputBus.disconnect(this.hpfNode); } catch (e) {}
+      }
+      try { this.inputBus.disconnect(this.micGainNode); } catch (e) {}
+
+      if (enabled && this.hpfNode) {
+        this.inputBus.connect(this.hpfNode);
+        try {
+          this.hpfNode.disconnect();
+        } catch (e) {}
+        this.hpfNode.connect(this.micGainNode);
       } else {
-        this.sourceNode.connect(this.micGainNode);
+        this.inputBus.connect(this.micGainNode);
       }
     }
   }
 
   setLimiter(enabled) {
     this.isLimiterEnabled = enabled;
-    if (this.eqHighNode) {
-      this.eqHighNode.disconnect();
-      if (enabled) {
+    if (this.eqHighNode && this.muteGainNode) {
+      try {
+        this.eqHighNode.disconnect();
+      } catch (e) {}
+      if (enabled && this.limiterNode) {
         this.eqHighNode.connect(this.limiterNode);
+        try {
+          this.limiterNode.disconnect();
+        } catch (e) {}
         this.limiterNode.connect(this.muteGainNode);
       } else {
         this.eqHighNode.connect(this.muteGainNode);
@@ -533,12 +870,19 @@ class MicChecker {
       const copy = new Float32Array(input.length);
       copy.set(input);
       this.recordedPCM.push(copy);
+      // 無音出力の保証
+      const output = e.outputBuffer.getChannelData(0);
+      output.fill(0);
     };
 
-    // マイクソース -> プロセッサー -> ゼロ出力 (ダミー接続)
-    if (this.audioManager.sourceNode) {
-      this.audioManager.sourceNode.connect(this.processorNode);
-      this.processorNode.connect(ctx.destination);
+    // 処理済みの声 (マイクゲイン・声をクリアに 適用後) -> プロセッサー -> ゼロ出力 (ダミー接続)
+    const inputSource = this.audioManager.voiceOutputNode || this.audioManager.inputBus || this.audioManager.sourceNode;
+    if (inputSource) {
+      this.zeroGainNode = ctx.createGain();
+      this.zeroGainNode.gain.value = 0.0;
+      inputSource.connect(this.processorNode);
+      this.processorNode.connect(this.zeroGainNode);
+      this.zeroGainNode.connect(ctx.destination);
     }
 
     // プログレスバー & タイマー
@@ -567,8 +911,15 @@ class MicChecker {
     if (this.processorNode) {
       try {
         this.processorNode.disconnect();
-        if (this.audioManager.sourceNode) {
-          this.audioManager.sourceNode.disconnect(this.processorNode);
+        if (this.zeroGainNode) {
+          this.zeroGainNode.disconnect();
+          this.zeroGainNode = null;
+        }
+        const inputSource = this.audioManager.voiceOutputNode || this.audioManager.inputBus || this.audioManager.sourceNode;
+        if (inputSource) {
+          try {
+            inputSource.disconnect(this.processorNode);
+          } catch (e) {}
         }
       } catch (e) {
         // ignore
@@ -614,9 +965,7 @@ class MicChecker {
 
     this.isPlaying = true;
     if (this.onStateChange) this.onStateChange('playing');
-    if (this.audioManager.videoElement) {
-      this.audioManager.videoElement.play().catch(() => {});
-    }
+    this.audioManager.playMediaRouter();
 
     this.playbackSource.onended = () => {
       this.isPlaying = false;
@@ -651,8 +1000,12 @@ class Visualizer {
     this.audioManager = audioManager;
     this.animationId = null;
     this.peakValue = 0;
-    this.peakDecay = 0.95;
+    this.peakDecay = 0.9; // 30fps 描画時の減衰率
     this.dataArray = null;
+    this.peakElem = document.getElementById('peak-indicator');
+    this.lastFrameTime = -Infinity;
+    this.lastTextTime = -Infinity;
+    this.idleDrawn = false;
 
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -662,30 +1015,45 @@ class Visualizer {
     const rect = this.canvas.parentElement.getBoundingClientRect();
     this.canvas.width = rect.width * (window.devicePixelRatio || 1);
     this.canvas.height = rect.height * (window.devicePixelRatio || 1);
+    this.idleDrawn = false; // サイズ変更で消えたメーターを描き直す
   }
 
   start() {
     if (this.animationId) return;
-    this.draw();
+    this.draw(0);
   }
 
-  draw() {
-    this.animationId = requestAnimationFrame(() => this.draw());
+  // DOM の書き換えは値が変わった時だけ (毎フレームのスタイル再計算を避ける)
+  setPeakText(text, className) {
+    if (!this.peakElem) return;
+    if (this.peakElem.textContent !== text) this.peakElem.textContent = text;
+    if (this.peakElem.className !== className) this.peakElem.className = className;
+  }
+
+  draw(timestamp) {
+    this.animationId = requestAnimationFrame((t) => this.draw(t));
+
+    // 低負荷化: 描画は最大 30fps。待機中はメーターが下がりきったら描画を止める
+    if (timestamp - this.lastFrameTime < 33) return;
+    this.lastFrameTime = timestamp;
 
     const width = this.canvas.width;
     const height = this.canvas.height;
-    this.ctx.clearRect(0, 0, width, height);
 
     if (!this.audioManager.analyserNode || !this.audioManager.isMicActive) {
-      this.peakValue *= 0.9;
-      this.drawMeter(0, this.peakValue);
-      const peakElem = document.getElementById('peak-indicator');
-      if (peakElem) {
-        peakElem.textContent = '-inf dB';
-        peakElem.className = 'text-slate-400 font-mono';
+      if (this.idleDrawn) return;
+      this.ctx.clearRect(0, 0, width, height);
+      this.peakValue *= 0.8;
+      if (this.peakValue < 0.01) {
+        this.peakValue = 0;
+        this.idleDrawn = true;
       }
+      this.drawMeter(0, this.peakValue);
+      this.setPeakText('-inf dB', 'text-slate-400 font-mono');
       return;
     }
+    this.idleDrawn = false;
+    this.ctx.clearRect(0, 0, width, height);
 
     if (!this.dataArray) {
       this.dataArray = new Uint8Array(this.audioManager.analyserNode.frequencyBinCount);
@@ -711,19 +1079,16 @@ class Visualizer {
 
     this.drawMeter(normalized, this.peakValue);
 
+    // 数値表示は 8 回/秒で十分 (読み取れる速さ & レイアウト計算の削減)
+    if (timestamp - this.lastTextTime < 120) return;
+    this.lastTextTime = timestamp;
     const peakDb = Math.round(db);
-    const peakElem = document.getElementById('peak-indicator');
-    if (peakElem) {
-      if (peakDb >= -1) {
-        peakElem.textContent = `${peakDb >= 0 ? '+' : ''}${peakDb} dB (CLIP)`;
-        peakElem.className = 'text-red-600 font-bold font-mono';
-      } else if (peakDb >= -6) {
-        peakElem.textContent = `${peakDb} dB`;
-        peakElem.className = 'text-amber-600 font-bold font-mono';
-      } else {
-        peakElem.textContent = `${peakDb} dB`;
-        peakElem.className = 'text-slate-600 font-mono';
-      }
+    if (peakDb >= -1) {
+      this.setPeakText(`${peakDb >= 0 ? '+' : ''}${peakDb} dB (CLIP)`, 'text-red-600 font-bold font-mono');
+    } else if (peakDb >= -6) {
+      this.setPeakText(`${peakDb} dB`, 'text-amber-600 font-bold font-mono');
+    } else {
+      this.setPeakText(`${peakDb} dB`, 'text-slate-600 font-mono');
     }
   }
 
@@ -762,6 +1127,9 @@ class Visualizer {
  * アプリケーション コントローラー
  */
 document.addEventListener('DOMContentLoaded', async () => {
+  // テストページ等からモジュールとして読み込まれた時は UI を起動しない
+  if (!document.getElementById('main-mic-btn')) return;
+
   if (window.lucide) {
     lucide.createIcons();
   }
@@ -827,8 +1195,34 @@ document.addEventListener('DOMContentLoaded', async () => {
   const btnDeviceSettings = document.getElementById('btn-device-settings');
   const btnCloseDeviceModal = document.getElementById('btn-close-device-modal');
   const selectAudioInput = document.getElementById('select-audio-input');
+  const selectMicChannel = document.getElementById('select-mic-channel');
   const selectAudioOutput = document.getElementById('select-audio-output');
+  const selectOutputRoute = document.getElementById('select-output-route');
   const btnApplyDevice = document.getElementById('btn-apply-device');
+
+  // 声をクリアに Elements
+  const voiceFocusButtons = Array.from(document.querySelectorAll('[data-voice-focus]'));
+  const voiceFocusStatus = document.getElementById('voice-focus-status');
+  const toggleNativeNs = document.getElementById('toggle-native-ns');
+  const nativeNsNote = document.getElementById('native-ns-note');
+
+  // 設定の保存 (プライベートブラウズ等で localStorage が使えなくても動作は続ける)
+  const loadSetting = (key, fallback) => {
+    try {
+      const value = localStorage.getItem(key);
+      return value === null ? fallback : value;
+    } catch (e) {
+      return fallback;
+    }
+  };
+  const saveSetting = (key, value) => {
+    try { localStorage.setItem(key, value); } catch (e) {}
+  };
+
+  const savedVoiceFocus = loadSetting('voice_focus_level', 'standard');
+  audioManager.voiceFocusLevel = (savedVoiceFocus === 'off' || VOICE_FOCUS_PRESETS[savedVoiceFocus]) ? savedVoiceFocus : 'standard';
+  audioManager.useNativeNoiseSuppression = loadSetting('native_noise_suppression', 'on') !== 'off';
+  audioManager.outputRoute = loadSetting('output_route', 'context') === 'media' ? 'media' : 'context';
 
   // 初回安全モーダル
   if (!localStorage.getItem('safety_agreed')) {
@@ -844,18 +1238,23 @@ document.addEventListener('DOMContentLoaded', async () => {
     safetyModal.classList.remove('hidden');
   });
 
-  // 初期化関数
+  // 初期化関数 (連打されても初期化は 1 回だけ。二重に getUserMedia するとマイク入力が重複する)
+  let initPromise = null;
   async function ensureAudioReady() {
-    if (!isInitialized) {
-      try {
-        await audioManager.init();
+    if (isInitialized) return;
+    if (!initPromise) {
+      initPromise = audioManager.init().then(async () => {
         isInitialized = true;
         await populateAudioDevices();
-      } catch (err) {
+        refreshVoiceFocusStatus();
+        refreshNativeNsUI();
+      }).catch((err) => {
+        initPromise = null;
         alert("マイクの使用が許可されませんでした。ブラウザのマイク権限を許可してください。");
         throw err;
-      }
+      });
     }
+    await initPromise;
   }
 
   async function populateAudioDevices() {
@@ -920,6 +1319,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   btnDeviceSettings.addEventListener('click', async () => {
     await ensureAudioReady();
     await populateAudioDevices();
+    if (selectMicChannel) {
+      selectMicChannel.value = audioManager.micChannelMode || 'ch1';
+    }
+    if (selectOutputRoute) {
+      selectOutputRoute.value = audioManager.outputRoute;
+    }
     deviceModal.classList.remove('hidden');
   });
 
@@ -930,10 +1335,118 @@ document.addEventListener('DOMContentLoaded', async () => {
   btnApplyDevice.addEventListener('click', async () => {
     const inId = selectAudioInput.value;
     const outId = selectAudioOutput.value;
+    if (selectMicChannel) {
+      audioManager.setMicChannelMode(selectMicChannel.value);
+    }
     await audioManager.init(inId);
     await audioManager.setOutputDevice(outId);
+    if (selectOutputRoute) {
+      audioManager.setOutputRoute(selectOutputRoute.value);
+      saveSetting('output_route', audioManager.outputRoute);
+    }
+    refreshNativeNsUI();
     deviceModal.classList.add('hidden');
   });
+
+  if (selectMicChannel) {
+    selectMicChannel.addEventListener('change', () => {
+      audioManager.setMicChannelMode(selectMicChannel.value);
+    });
+  }
+
+  if (selectOutputRoute) {
+    selectOutputRoute.addEventListener('change', () => {
+      audioManager.setOutputRoute(selectOutputRoute.value);
+      saveSetting('output_route', audioManager.outputRoute);
+    });
+  }
+
+  // --- 声をクリアに（全指向性マイク向け 雑音・残響カット） ---
+  const VOICE_FOCUS_BTN_ACTIVE = 'py-1.5 rounded-lg text-xs font-bold transition-all bg-white text-emerald-700 shadow-sm';
+  const VOICE_FOCUS_BTN_IDLE = 'py-1.5 rounded-lg text-xs font-medium text-slate-600 transition-all hover:text-slate-900';
+  const VOICE_STATUS_TONES = {
+    idle: 'bg-slate-100 text-slate-500',
+    voice: 'bg-emerald-100 text-emerald-700',
+    cut: 'bg-indigo-100 text-indigo-700',
+    warn: 'bg-amber-100 text-amber-700'
+  };
+  let lastVoiceStatus = '';
+
+  function setVoiceFocusStatus(text, tone) {
+    if (!voiceFocusStatus || lastVoiceStatus === text + tone) return;
+    lastVoiceStatus = text + tone;
+    voiceFocusStatus.textContent = text;
+    voiceFocusStatus.className = `text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap ${VOICE_STATUS_TONES[tone]}`;
+  }
+
+  function refreshVoiceFocusStatus() {
+    if (audioManager.voiceFocusLevel === 'off') {
+      setVoiceFocusStatus('OFF', 'idle');
+    } else if (!isInitialized) {
+      setVoiceFocusStatus('待機中', 'idle');
+    } else if (!audioManager.voiceFocusNode) {
+      setVoiceFocusStatus('簡易モード (EQのみ)', 'warn');
+    }
+    // 処理中の状態は Worklet からのメーター通知で更新する
+  }
+
+  function updateVoiceFocusButtons() {
+    voiceFocusButtons.forEach(btn => {
+      const selected = btn.dataset.voiceFocus === audioManager.voiceFocusLevel;
+      btn.className = selected ? VOICE_FOCUS_BTN_ACTIVE : VOICE_FOCUS_BTN_IDLE;
+      btn.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    });
+  }
+
+  function refreshNativeNsUI() {
+    if (!toggleNativeNs) return;
+    toggleNativeNs.checked = audioManager.useNativeNoiseSuppression;
+    const unsupported = isInitialized && !audioManager.nativeNoiseSuppressionSupported;
+    toggleNativeNs.disabled = unsupported;
+    if (nativeNsNote) {
+      nativeNsNote.textContent = unsupported
+        ? '（このブラウザは非対応。上の処理だけで動作します）'
+        : '（切り替え時に一瞬音が途切れます）';
+    }
+  }
+
+  audioManager.onVoiceFocusMeter = (meter) => {
+    if (document.hidden || audioManager.voiceFocusLevel === 'off') return;
+    if (meter.open) {
+      setVoiceFocusStatus('声を検出中', 'voice');
+    } else {
+      setVoiceFocusStatus(`雑音カット中 ${Math.round(meter.reductionDb)}dB`, 'cut');
+    }
+  };
+
+  voiceFocusButtons.forEach(btn => {
+    btn.addEventListener('click', () => {
+      audioManager.setVoiceFocusLevel(btn.dataset.voiceFocus);
+      saveSetting('voice_focus_level', audioManager.voiceFocusLevel);
+      updateVoiceFocusButtons();
+      lastVoiceStatus = '';
+      refreshVoiceFocusStatus();
+    });
+  });
+
+  if (toggleNativeNs) {
+    toggleNativeNs.addEventListener('change', async () => {
+      const enabled = toggleNativeNs.checked;
+      toggleNativeNs.disabled = true;
+      try {
+        await audioManager.setNativeNoiseSuppression(enabled);
+        saveSetting('native_noise_suppression', enabled ? 'on' : 'off');
+      } catch (err) {
+        console.warn("ノイズ抑制の切り替えに失敗:", err);
+      } finally {
+        refreshNativeNsUI();
+      }
+    });
+  }
+
+  updateVoiceFocusButtons();
+  refreshVoiceFocusStatus();
+  refreshNativeNsUI();
 
   // トークモード切り替え
   modeToggleBtn.addEventListener('click', () => {
@@ -1201,3 +1714,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 });
+
+export { AudioManager, MicChecker, Visualizer, VOICE_FOCUS_PRESETS };
+

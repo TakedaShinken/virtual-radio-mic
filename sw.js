@@ -1,9 +1,10 @@
-const CACHE_NAME = 'virtual-mic-v1';
+const CACHE_NAME = 'virtual-mic-v2';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
   './style.css',
   './app.js',
+  './voice-focus-worklet.js',
   './manifest.webmanifest'
 ];
 

@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<div id="output">Running tests...</div>
+<script type="module">
+  import { AudioManager, MicChecker } from '../app.js';
+
+  async function runAllTests() {
+    const results = [];
+
+    // Helper: simulate audio rendering through graph
+    async function testPipeline(setupFn, inputChannels) {
+      const sampleRate = 48000;
+      const length = 4096;
+      const offlineCtx = new OfflineAudioContext(2, length, sampleRate);
+      offlineCtx.createMediaStreamDestination = () => {
+        const dummyNode = offlineCtx.createGain();
+        dummyNode.stream = { getAudioTracks: () => [{}] };
+        return dummyNode;
+      };
+
+      // Create a test AudioManager using offlineCtx
+      const am = new AudioManager();
+      am.ctx = offlineCtx;
+      await am.setupAudioGraph();
+
+      if (setupFn) setupFn(am);
+
+      // Create input buffer
+      const numInCh = inputChannels.length;
+      const inBuffer = offlineCtx.createBuffer(numInCh, length, sampleRate);
+      for (let ch = 0; ch < numInCh; ch++) {
+        inBuffer.copyToChannel(inputChannels[ch], ch);
+      }
+
+      const bufferSource = offlineCtx.createBufferSource();
+      bufferSource.buffer = inBuffer;
+
+      // Connect bufferSource to am.channelSplitterNode
+      if (am.channelSplitterNode) {
+        bufferSource.connect(am.channelSplitterNode);
+      } else {
+        bufferSource.connect(am.inputBus || am.micGainNode);
+      }
+
+      // Activate mic (muteGain = 1.0)
+      am.muteGainNode.gain.setValueAtTime(1.0, 0);
+
+      bufferSource.start(0);
+
+      const rendered = await offlineCtx.startRendering();
+      const leftOut = rendered.getChannelData(0);
+      const rightOut = rendered.getChannelData(1);
+
+      return { leftOut, rightOut, am };
+    }
+
+    function generateTone(samples, freq = 440, sampleRate = 48000) {
+      const data = new Float32Array(samples);
+      for (let i = 0; i < samples; i++) {
+        data[i] = Math.sin((2 * Math.PI * freq * i) / sampleRate) * 0.5;
+      }
+      return data;
+    }
+
+    function calculateRms(buffer, start = 1000, end = 3000) {
+      let sum = 0;
+      for (let i = start; i < end; i++) {
+        sum += buffer[i] * buffer[i];
+      }
+      return Math.sqrt(sum / (end - start));
+    }
+
+    const testTone = generateTone(4096, 440);
+    const silentTone = new Float32Array(4096);
+
+    // Test 1: Stereo TRRS Wired Earphone input: Left = voice, Right = silence
+    {
+      const { leftOut, rightOut } = await testPipeline(null, [testTone, silentTone]);
+      const leftRms = calculateRms(leftOut);
+      const rightRms = calculateRms(rightOut);
+      const ratio = rightRms / (leftRms || 1e-9);
+
+      results.push({
+        name: "Test 1: TRRS Wired Earphone input (L=voice, R=silent)",
+        leftRms,
+        rightRms,
+        ratio,
+        pass: leftRms > 0.1 && rightRms > 0.1 && Math.abs(leftRms - rightRms) < 0.01,
+        details: `leftRms: ${leftRms.toFixed(4)}, rightRms: ${rightRms.toFixed(4)}`
+      });
+    }
+
+    // Test 2: True Mono (1-channel) input
+    {
+      const { leftOut, rightOut } = await testPipeline(null, [testTone]);
+      const leftRms = calculateRms(leftOut);
+      const rightRms = calculateRms(rightOut);
+
+      results.push({
+        name: "Test 2: True mono 1-channel input",
+        leftRms,
+        rightRms,
+        pass: leftRms > 0.1 && rightRms > 0.1 && Math.abs(leftRms - rightRms) < 0.01,
+        details: `leftRms: ${leftRms.toFixed(4)}, rightRms: ${rightRms.toFixed(4)}`
+      });
+    }
+
+    // Test 3: Channel 2 input (e.g. 2-channel audio IF where mic is plugged into Ch2/Right)
+    {
+      const { leftOut, rightOut } = await testPipeline((am) => {
+        am.setMicChannelMode('ch2');
+      }, [silentTone, testTone]);
+      const leftRms = calculateRms(leftOut);
+      const rightRms = calculateRms(rightOut);
+
+      results.push({
+        name: "Test 3: Audio IF Ch2 input (L=silent, R=voice) with mode='ch2'",
+        leftRms,
+        rightRms,
+        pass: leftRms > 0.1 && rightRms > 0.1 && Math.abs(leftRms - rightRms) < 0.01,
+        details: `leftRms: ${leftRms.toFixed(4)}, rightRms: ${rightRms.toFixed(4)}`
+      });
+    }
+
+    // Test 4: Low-cut ON vs OFF
+    {
+      const { leftOut: leftCut } = await testPipeline((am) => {
+        am.setLowCut(true);
+      }, [testTone, silentTone]);
+      const { leftOut: leftNoCut } = await testPipeline((am) => {
+        am.setLowCut(false);
+      }, [testTone, silentTone]);
+
+      const rmsCut = calculateRms(leftCut);
+      const rmsNoCut = calculateRms(leftNoCut);
+
+      results.push({
+        name: "Test 4: LowCut toggle verification",
+        pass: rmsCut > 0.1 && rmsNoCut > 0.1,
+        details: `Cut: ${rmsCut.toFixed(4)}, NoCut: ${rmsNoCut.toFixed(4)}`
+      });
+    }
+
+    // Test 5: Reverb FX (check stereo reverb spread)
+    {
+      const { leftOut, rightOut } = await testPipeline((am) => {
+        am.toggleFX('reverb');
+      }, [testTone, silentTone]);
+      const leftRms = calculateRms(leftOut);
+      const rightRms = calculateRms(rightOut);
+
+      results.push({
+        name: "Test 5: Reverb FX enabled",
+        leftRms,
+        rightRms,
+        pass: leftRms > 0.1 && rightRms > 0.1,
+        details: `leftRms: ${leftRms.toFixed(4)}, rightRms: ${rightRms.toFixed(4)}`
+      });
+    }
+
+    // Test 6: Echo FX
+    {
+      const { leftOut, rightOut } = await testPipeline((am) => {
+        am.toggleFX('echo');
+      }, [testTone, silentTone]);
+      const leftRms = calculateRms(leftOut);
+      const rightRms = calculateRms(rightOut);
+
+      results.push({
+        name: "Test 6: Echo FX enabled",
+        leftRms,
+        rightRms,
+        pass: leftRms > 0.1 && rightRms > 0.1 && Math.abs(leftRms - rightRms) < 0.01,
+        details: `leftRms: ${leftRms.toFixed(4)}, rightRms: ${rightRms.toFixed(4)}`
+      });
+    }
+
+    // Test 7: Radio FX
+    {
+      const { leftOut, rightOut } = await testPipeline((am) => {
+        am.toggleFX('radio');
+      }, [testTone, silentTone]);
+      const leftRms = calculateRms(leftOut);
+      const rightRms = calculateRms(rightOut);
+
+      results.push({
+        name: "Test 7: Radio FX enabled",
+        leftRms,
+        rightRms,
+        pass: leftRms > 0.05 && rightRms > 0.05 && Math.abs(leftRms - rightRms) < 0.01,
+        details: `leftRms: ${leftRms.toFixed(4)}, rightRms: ${rightRms.toFixed(4)}`
+      });
+    }
+
+    // Test 8: Robot FX
+    {
+      const { leftOut, rightOut } = await testPipeline((am) => {
+        am.toggleFX('robot');
+      }, [testTone, silentTone]);
+      const leftRms = calculateRms(leftOut);
+      const rightRms = calculateRms(rightOut);
+
+      results.push({
+        name: "Test 8: Robot FX enabled",
+        leftRms,
+        rightRms,
+        pass: leftRms > 0.05 && rightRms > 0.05 && Math.abs(leftRms - rightRms) < 0.01,
+        details: `leftRms: ${leftRms.toFixed(4)}, rightRms: ${rightRms.toFixed(4)}`
+      });
+    }
+
+    return results;
+  }
+
+  // ===== 声をクリアに（雑音・残響カット）& 低負荷の目標テスト =====
+  const SR = 48000;
+
+  // 再現性のある乱数 (mulberry32)
+  function makeRandom(seed) {
+    let t = seed >>> 0;
+    return () => {
+      t += 0x6D2B79F5;
+      let r = Math.imul(t ^ (t >>> 15), 1 | t);
+      r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+      return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  function normalizeRms(buf, levelDb) {
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length) || 1e-12;
+    const scale = Math.pow(10, levelDb / 20) / rms;
+    for (let i = 0; i < buf.length; i++) buf[i] *= scale;
+    return buf;
+  }
+
+  // 帯域内のランダム位相正弦波の和 (対数等間隔の周波数分布 = オクターブあたり等エネルギー)
+  function bandNoise(seconds, fLo, fHi, levelDb, seed, components = 40) {
+    const n = Math.round(seconds * SR);
+    const out = new Float32Array(n);
+    const rnd = makeRandom(seed);
+    for (let k = 0; k < components; k++) {
+      const f = fLo * Math.pow(fHi / fLo, rnd());
+      const w = (2 * Math.PI * f) / SR;
+      const ph = rnd() * 2 * Math.PI;
+      for (let i = 0; i < n; i++) out[i] += Math.sin(w * i + ph);
+    }
+    return normalizeRms(out, levelDb);
+  }
+
+  // 声の代わり: 基本周波数 f0 の倍音列 (-6dB/oct)、amHz > 0 で音節のような抑揚 (谷の深さ = amFloor)
+  function harmonicVoice(seconds, f0, levelDb, amHz = 0, amFloor = 0.3) {
+    const n = Math.round(seconds * SR);
+    const out = new Float32Array(n);
+    for (let h = 1; f0 * h < 4000; h++) {
+      const w = (2 * Math.PI * f0 * h) / SR;
+      for (let i = 0; i < n; i++) out[i] += Math.sin(w * i) / h;
+    }
+    if (amHz > 0) {
+      for (let i = 0; i < n; i++) {
+        out[i] *= amFloor + (1 - amFloor) * (0.5 - 0.5 * Math.cos((2 * Math.PI * amHz * i) / SR));
+      }
+    }
+    return normalizeRms(out, levelDb);
+  }
+
+  // dst に src を重ねる (fadeMs のコサインフェードでクリック防止)
+  function mixAt(dst, src, startSec, fadeMs = 10) {
+    const off = Math.round(startSec * SR);
+    const fade = Math.round((fadeMs / 1000) * SR);
+    for (let i = 0; i < src.length && off + i < dst.length; i++) {
+      let g = 1;
+      if (i < fade) g = 0.5 - 0.5 * Math.cos((Math.PI * i) / fade);
+      else if (i > src.length - fade) g = 0.5 - 0.5 * Math.cos((Math.PI * (src.length - i)) / fade);
+      dst[off + i] += src[i] * g;
+    }
+    return dst;
+  }
+
+  // 部屋の響きを畳み込む (指数減衰ノイズのインパルス応答、RT60 指定、直接音:残響のエネルギー比 = drrDb)
+  async function reverberate(dry, rt60, drrDb, seed) {
+    const ctx = new OfflineAudioContext(1, dry.length, SR);
+    const irLen = Math.round(rt60 * 1.2 * SR);
+    const ir = ctx.createBuffer(1, irLen, SR);
+    const d = ir.getChannelData(0);
+    const rnd = makeRandom(seed);
+    const k = Math.pow(10, -3 / (rt60 * SR)); // 1 サンプルあたりの振幅減衰 (RT60 で -60dB)
+    let g = 1;
+    for (let i = 0; i < irLen; i++) {
+      d[i] = (rnd() * 2 - 1) * g;
+      g *= k;
+    }
+    for (let i = 0; i < Math.round(0.005 * SR); i++) d[i] = 0; // 5ms の初期遅延
+    const conv = ctx.createConvolver();
+    conv.normalize = false;
+    conv.buffer = ir;
+    const buf = ctx.createBuffer(1, dry.length, SR);
+    buf.copyToChannel(dry, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(conv);
+    conv.connect(ctx.destination);
+    src.start(0);
+    const wet = (await ctx.startRendering()).getChannelData(0);
+    let eDry = 0, eWet = 0;
+    for (let i = 0; i < dry.length; i++) {
+      eDry += dry[i] * dry[i];
+      eWet += wet[i] * wet[i];
+    }
+    const scale = Math.sqrt(eDry / eWet) * Math.pow(10, -drrDb / 20);
+    const out = new Float32Array(dry.length);
+    for (let i = 0; i < dry.length; i++) out[i] = dry[i] + wet[i] * scale;
+    return out;
+  }
+
+  // 20ms ごとのレベル分布の P90 - P10 (音節の山と谷の差 = 明瞭さ。残響は谷を埋めて差を小さくする)
+  function modulationDepthDb(buf, t0, t1) {
+    const levels = [];
+    for (let t = t0; t + 0.02 <= t1; t += 0.02) levels.push(rmsDb(buf, t, t + 0.02));
+    levels.sort((a, b) => a - b);
+    return levels[Math.floor(levels.length * 0.9)] - levels[Math.floor(levels.length * 0.1)];
+  }
+
+  function rmsDb(buf, t0, t1) {
+    const a = Math.floor(t0 * SR);
+    const b = Math.min(buf.length, Math.floor(t1 * SR));
+    let sum = 0;
+    for (let i = a; i < b; i++) sum += buf[i] * buf[i];
+    return 10 * Math.log10(sum / Math.max(1, b - a) + 1e-20);
+  }
+
+  // mode: 'off' | 'light' | 'standard' | 'strong' | 'eq-only' (= standard の EQ のみ)
+  // options.eqOnly: 同じ強さの EQ だけを残して Worklet を外した参照 (ダイナミクス処理単体の効果測定用)
+  async function renderVoice(mode, input, options = {}) {
+    const ctx = new OfflineAudioContext(2, input.length, SR);
+    const am = new AudioManager();
+    am.ctx = ctx;
+    am.voiceFocusLevel = mode === 'eq-only' ? 'standard' : mode;
+    await am.setupAudioGraph();
+    if (mode === 'eq-only' || options.eqOnly) {
+      am.voiceFocusNode = null;
+      am.rewireVoiceChain();
+    }
+    if (options.legacyAlwaysOnFx) {
+      // 旧構成相当: OFF の FX にも常に入力を流し続ける
+      ['echo', 'radio', 'robot', 'reverb'].forEach(fx => am.setFxInputConnected(fx, true));
+    }
+    const buf = ctx.createBuffer(1, input.length, SR);
+    buf.copyToChannel(input, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(am.channelSplitterNode);
+    am.muteGainNode.gain.setValueAtTime(1.0, 0);
+    src.start(0);
+    const t0 = performance.now();
+    const rendered = await ctx.startRendering();
+    const elapsedMs = performance.now() - t0;
+    return { out: rendered.getChannelData(0), elapsedMs, am };
+  }
+
+  async function runVoiceFocusTests() {
+    const results = [];
+    const fmt = (v) => (v >= 0 ? '+' : '') + v.toFixed(1) + 'dB';
+
+    // 前提: 実ブラウザで AudioWorklet が読み込まれていること (ブラウザ内だけで処理)
+    {
+      const ctx = new OfflineAudioContext(1, 128, SR);
+      const am = new AudioManager();
+      am.ctx = ctx;
+      await am.setupAudioGraph();
+      results.push({
+        name: "Goal[browser-only]: voice-focus AudioWorklet loads in the browser",
+        pass: !!am.voiceFocusNode,
+        details: am.voiceFocusNode ? 'AudioWorkletNode created' : 'worklet missing (EQ-only fallback)'
+      });
+    }
+
+    // 目標1: 声以外の音 (話していない間の環境音) を下げる
+    {
+      const input = new Float32Array(5 * SR);
+      mixAt(input, bandNoise(5, 300, 3000, -50, 11), 0, 1);
+      mixAt(input, harmonicVoice(1.0, 150, -20, 4), 2.0, 15);
+      const off = await renderVoice('off', input);
+      const std = await renderVoice('standard', input);
+      const noiseCut = rmsDb(off.out, 4.2, 5.0) - rmsDb(std.out, 4.2, 5.0);
+      results.push({
+        name: "Goal[noise]: background sound in pauses is reduced >= 12 dB (standard)",
+        pass: noiseCut >= 12,
+        details: `pause noise reduced by ${noiseCut.toFixed(1)} dB`
+      });
+      const voiceChange = rmsDb(std.out, 2.2, 2.9) - rmsDb(off.out, 2.2, 2.9);
+      results.push({
+        name: "Goal[noise]: syllabic speech keeps its level (within 6 dB)",
+        pass: voiceChange > -6,
+        details: `speech level change ${fmt(voiceChange)}`
+      });
+    }
+
+    // 目標1': 強さの順に効く (OFF < 弱 < 標準 < 強)
+    {
+      const input = new Float32Array(5 * SR);
+      mixAt(input, bandNoise(5, 300, 3000, -50, 23), 0, 1);
+      mixAt(input, harmonicVoice(1.0, 150, -20, 4), 2.0, 15);
+      const levels = ['off', 'light', 'standard', 'strong'];
+      const noise = [];
+      for (const lv of levels) {
+        const r = await renderVoice(lv, input);
+        noise.push(rmsDb(r.out, 4.2, 5.0));
+      }
+      const monotonic = noise[0] > noise[1] && noise[1] > noise[2] && noise[2] > noise[3];
+      results.push({
+        name: "Goal[noise]: strength presets are ordered (OFF > 弱 > 標準 > 強 residual noise)",
+        pass: monotonic,
+        details: levels.map((lv, i) => `${lv}: ${noise[i].toFixed(1)}dB`).join(', ')
+      });
+    }
+
+    // 目標2: 残響 (声の後に残る響き) を減らす — 部屋の響き (RT60 = 1.0s) を実際に畳み込んだ音で評価
+    {
+      const dry = new Float32Array(3.5 * SR);
+      mixAt(dry, harmonicVoice(0.5, 150, -20), 1.0, 10); // 1.0-1.5s に声
+      const input = await reverberate(dry, 1.0, 0, 71);   // 直接音:残響 = 0dB (響く体育館・ホールの数 m 先)
+      mixAt(input, bandNoise(3.5, 150, 6000, -65, 31), 0, 1);
+
+      const off = await renderVoice('off', input);
+      const std = await renderVoice('standard', input);
+      const stdEq = await renderVoice('standard', input, { eqOnly: true });
+      const strong = await renderVoice('strong', input);
+      const strongEq = await renderVoice('strong', input, { eqOnly: true });
+
+      // 残響の大きさ = 声 (直接音 + 残響) に対する、声が終わった後の響きの比
+      const tailRatio = (r, t0, t1) => rmsDb(r.out, t0, t1) - rmsDb(r.out, 1.2, 1.45);
+      const earlyCut = tailRatio(off, 1.6, 2.1) - tailRatio(std, 1.6, 2.1);
+      // 同じ EQ の参照と比べたテール抑制単体の効果 (EQ の違いが比較に混ざらないようにする)
+      const dynStd = tailRatio(stdEq, 1.6, 2.1) - tailRatio(std, 1.6, 2.1);
+      const dynStrong = tailRatio(strongEq, 1.6, 2.1) - tailRatio(strong, 1.6, 2.1);
+      // 声が終わってから 20dB 下がるまでの時間 (聞こえる響きの長さ)
+      const decayTime = (r, drop) => {
+        const ref = rmsDb(r.out, 1.40, 1.45);
+        for (let t = 1.5; t < 3.4; t += 0.005) {
+          if (rmsDb(r.out, t, t + 0.01) <= ref - drop) return t - 1.5;
+        }
+        return Infinity;
+      };
+      const t20Off = decayTime(off, 20);
+      const t20Std = decayTime(std, 20);
+      const t20Strong = decayTime(strong, 20);
+
+      results.push({
+        name: "Goal[reverb]: reverb after speech is reduced >= 5 dB (standard vs OFF, RT60 1.0s room)",
+        pass: earlyCut >= 5,
+        details: `reverb-to-voice ratio 0.1-0.6s after speech reduced by ${earlyCut.toFixed(1)} dB`
+      });
+      results.push({
+        name: "Goal[reverb]: audible reverb decay is >= 30% shorter (time to fall 20 dB)",
+        pass: t20Std <= 0.7 * t20Off,
+        details: `OFF ${(t20Off * 1000).toFixed(0)} ms -> standard ${(t20Std * 1000).toFixed(0)} ms, strong ${(t20Strong * 1000).toFixed(0)} ms`
+      });
+      results.push({
+        name: "Goal[reverb]: strong suppresses the tail more than standard (same-EQ comparison)",
+        pass: dynStrong > dynStd && dynStd > 0,
+        details: `tail suppressor alone: standard -${dynStd.toFixed(1)} dB, strong -${dynStrong.toFixed(1)} dB`
+      });
+    }
+
+    // 目標2': 響く部屋での連続した話し声の明瞭さ (音節の谷が残響で埋まるのを戻す)
+    {
+      const dry = new Float32Array(3.0 * SR);
+      mixAt(dry, harmonicVoice(2.4, 150, -20, 4, 0.03), 0.3, 15);
+      const input = await reverberate(dry, 1.0, 0, 83);
+      mixAt(input, bandNoise(3.0, 150, 6000, -65, 47), 0, 1);
+      const off = await renderVoice('off', input);
+      const std = await renderVoice('standard', input);
+      const stdEq = await renderVoice('standard', input, { eqOnly: true });
+      const strong = await renderVoice('strong', input);
+      const strongEq = await renderVoice('strong', input, { eqOnly: true });
+      const dDry = modulationDepthDb(dry, 0.8, 2.6);
+      const dOff = modulationDepthDb(off.out, 0.8, 2.6);
+      const dStd = modulationDepthDb(std.out, 0.8, 2.6);
+      const dStrong = modulationDepthDb(strong.out, 0.8, 2.6);
+      // 強さの比較は同じ EQ の参照に対する改善量で行う (EQ の違いが混ざらないように)
+      const gainStd = dStd - modulationDepthDb(stdEq.out, 0.8, 2.6);
+      const gainStrong = dStrong - modulationDepthDb(strongEq.out, 0.8, 2.6);
+      results.push({
+        name: "Goal[reverb]: syllable clarity in a reverberant room improves >= 2 dB (standard)",
+        pass: dStd - dOff >= 2,
+        details: `syllable depth: dry ${dDry.toFixed(1)} dB, reverberant ${dOff.toFixed(1)} dB -> standard ${dStd.toFixed(1)} dB, strong ${dStrong.toFixed(1)} dB`
+      });
+      results.push({
+        name: "Goal[reverb]: strong restores more clarity than standard (same-EQ comparison)",
+        pass: gainStrong > gainStd,
+        details: `tail suppressor alone: standard +${gainStd.toFixed(1)} dB, strong +${gainStrong.toFixed(1)} dB`
+      });
+    }
+
+    // 副作用なし: 響きの抑制が「弱い音節」や「子音」を巻き込まない
+    {
+      // 大きい音節の直後に 10dB 小さい音節 (話し声ではよくある)
+      const softAfterLoud = new Float32Array(2.0 * SR);
+      mixAt(softAfterLoud, bandNoise(2.0, 150, 6000, -65, 9), 0, 1);
+      mixAt(softAfterLoud, harmonicVoice(0.3, 150, -15), 0.5, 5);
+      mixAt(softAfterLoud, harmonicVoice(0.4, 150, -25), 0.8, 5);
+      // 母音の直後の弱い摩擦音 (子音)
+      const fricative = new Float32Array(2.0 * SR);
+      mixAt(fricative, bandNoise(2.0, 150, 6000, -65, 13), 0, 1);
+      mixAt(fricative, harmonicVoice(0.3, 150, -15), 0.5, 5);
+      mixAt(fricative, bandNoise(0.12, 3000, 7000, -30, 17), 0.8, 3);
+
+      for (const level of ['standard', 'strong']) {
+        const soft = await renderVoice(level, softAfterLoud);
+        const softRef = await renderVoice(level, softAfterLoud, { eqOnly: true });
+        const fr = await renderVoice(level, fricative);
+        const frRef = await renderVoice(level, fricative, { eqOnly: true });
+        const softChange = rmsDb(soft.out, 0.83, 1.2) - rmsDb(softRef.out, 0.83, 1.2);
+        const frChange = rmsDb(fr.out, 0.81, 0.92) - rmsDb(frRef.out, 0.81, 0.92);
+        results.push({
+          name: `Side-effect: a softer syllable right after a loud one is kept (${level}, within 3 dB)`,
+          pass: softChange > -3,
+          details: `soft syllable change ${fmt(softChange)}`
+        });
+        results.push({
+          name: `Side-effect: a weak consonant right after a vowel is kept (${level}, within 3 dB)`,
+          pass: frChange > -3,
+          details: `fricative change ${fmt(frChange)}`
+        });
+      }
+    }
+
+    // 副作用なし: 定常的な声は削らない・揺らさない・立ち上がりを潰さない
+    {
+      const input = new Float32Array(2.5 * SR);
+      mixAt(input, bandNoise(2.5, 150, 6000, -65, 41), 0, 1);
+      mixAt(input, harmonicVoice(2.0, 150, -20), 0.3, 10);
+      const eqOnly = await renderVoice('eq-only', input);
+      const std = await renderVoice('standard', input);
+      const off = await renderVoice('off', input);
+
+      const workletChange = rmsDb(std.out, 0.8, 2.2) - rmsDb(eqOnly.out, 0.8, 2.2);
+      results.push({
+        name: "Side-effect: steady voice is not attenuated by the dynamics (within 1 dB of EQ-only)",
+        pass: Math.abs(workletChange) <= 1,
+        details: `dynamics change ${fmt(workletChange)}`
+      });
+
+      let minDb = Infinity, maxDb = -Infinity;
+      for (let t = 0.8; t < 2.2; t += 0.05) {
+        const d = rmsDb(std.out, t, t + 0.05);
+        minDb = Math.min(minDb, d);
+        maxDb = Math.max(maxDb, d);
+      }
+      results.push({
+        name: "Side-effect: no pumping on a steady voice (50 ms RMS spread <= 1 dB)",
+        pass: maxDb - minDb <= 1,
+        details: `spread ${(maxDb - minDb).toFixed(2)} dB`
+      });
+
+      const onsetChange = rmsDb(std.out, 0.3, 0.33) - rmsDb(eqOnly.out, 0.3, 0.33);
+      results.push({
+        name: "Side-effect: speech onset is not clipped (first 30 ms within 3 dB)",
+        pass: onsetChange > -3,
+        details: `onset change ${fmt(onsetChange)}`
+      });
+
+      const totalChange = rmsDb(std.out, 0.8, 2.2) - rmsDb(off.out, 0.8, 2.2);
+      results.push({
+        name: "Side-effect: overall voice level vs OFF stays within 4 dB (EQ cuts only)",
+        pass: Math.abs(totalChange) <= 4,
+        details: `level change ${fmt(totalChange)}`
+      });
+    }
+
+    // 目標3: 低負荷 (オフラインレンダリング速度で処理コストを測る)
+    {
+      const seconds = 20;
+      const pattern = new Float32Array(2 * SR);
+      mixAt(pattern, bandNoise(2, 150, 6000, -50, 53, 24), 0, 1);
+      mixAt(pattern, harmonicVoice(1.2, 150, -20, 4), 0.4, 15);
+      const input = new Float32Array(seconds * SR);
+      for (let k = 0; k < seconds / 2; k++) input.set(pattern, k * pattern.length);
+
+      // 他プロセスの負荷による揺らぎを避けるため、3 構成を交互に 5 回ずつ測って最小値を使う
+      let offMs = Infinity, stdMs = Infinity, legacyMs = Infinity;
+      for (let round = 0; round < 5; round++) {
+        offMs = Math.min(offMs, (await renderVoice('off', input)).elapsedMs);
+        stdMs = Math.min(stdMs, (await renderVoice('standard', input)).elapsedMs);
+        legacyMs = Math.min(legacyMs, (await renderVoice('off', input, { legacyAlwaysOnFx: true })).elapsedMs);
+      }
+      const rtf = (seconds * 1000) / stdMs;
+      const overheadPct = Math.max(0, (stdMs - offMs) / (seconds * 1000)) * 100;
+      results.push({
+        name: "Goal[low-load]: full chain with 声をクリアに renders >= 10x faster than real time",
+        pass: rtf >= 10,
+        details: `${rtf.toFixed(1)}x real time (${stdMs.toFixed(0)} ms for ${seconds} s)`
+      });
+      results.push({
+        name: "Goal[low-load]: 声をクリアに overhead <= 3% of one core in real time",
+        pass: overheadPct <= 3,
+        details: `overhead ${overheadPct.toFixed(2)}% (off ${offMs.toFixed(0)} ms / standard ${stdMs.toFixed(0)} ms)`
+      });
+      results.push({
+        name: "Goal[low-load]: new graph incl. 声をクリアに is lighter than the old always-on-FX graph",
+        pass: stdMs < legacyMs,
+        details: `standard ${stdMs.toFixed(0)} ms < legacy ${legacyMs.toFixed(0)} ms (${(100 * (1 - stdMs / legacyMs)).toFixed(0)}% less)`
+      });
+    }
+
+    return results;
+  }
+
+  window.addEventListener('DOMContentLoaded', async () => {
+    try {
+      const results = (await runAllTests()).concat(await runVoiceFocusTests());
+      document.getElementById('output').textContent = JSON.stringify(results, null, 2);
+      await fetch('/report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(results)
+      });
+    } catch (e) {
+      document.getElementById('output').textContent = JSON.stringify({
+        error: e.message,
+        stack: e.stack
+      });
+      await fetch('/report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify([{ name: "Pipeline Exception", pass: false, details: e.message + " " + e.stack }])
+      });
+    }
+  });
+</script>
+</body>
+</html>

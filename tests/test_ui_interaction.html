@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Virtual Radio Mic - 擬似スピーカー＆音声ミキサー (Browser Test)</title>
+  <link rel="stylesheet" href="../style.css">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased min-h-screen pb-12 select-none">
+  <!-- ヘッダー -->
+  <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-sm">
+    <div class="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <div class="w-9 h-9 rounded-lg bg-emerald-600 flex items-center justify-center text-white shadow-sm">
+          <i data-lucide="mic" class="w-5 h-5"></i>
+        </div>
+        <div>
+          <h1 class="text-base font-bold text-slate-900 leading-tight">Virtual Radio Mic</h1>
+          <p class="text-xs text-slate-500 font-medium">擬似スピーカー＆音声ミキサー</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="btn-device-settings" class="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors" title="オーディオ入出力設定">
+          <i data-lucide="settings" class="w-5 h-5"></i>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- メインコンテンツ -->
+  <main class="max-w-3xl mx-auto px-4 py-6 space-y-6">
+    <!-- トークモード切り替え -->
+    <div class="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+      <span class="text-xs font-bold text-slate-700">トークモード</span>
+      <div class="flex bg-slate-100 p-1 rounded-xl">
+        <button id="mode-toggle-btn" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-white text-slate-900 shadow-sm">トグル</button>
+        <button id="mode-ptt-btn" class="px-3 py-1.5 rounded-lg text-xs font-bold text-slate-500">PTT (長押し)</button>
+      </div>
+    </div>
+
+    <!-- マイクボタン -->
+    <div class="flex flex-col items-center justify-center py-6">
+      <button id="mic-button" class="w-48 h-48 rounded-full bg-slate-800 text-white font-extrabold text-2xl shadow-xl flex flex-col items-center justify-center gap-2 active:scale-95 transition-all">
+        <i data-lucide="mic-off" class="w-12 h-12"></i>
+        <span>マイク OFF</span>
+      </button>
+    </div>
+
+    <!-- エフェクトラック -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <button id="btn-fx-echo" class="p-3 bg-white border border-slate-200 rounded-xl text-center font-bold text-xs text-slate-700">エコー</button>
+      <button id="btn-fx-radio" class="p-3 bg-white border border-slate-200 rounded-xl text-center font-bold text-xs text-slate-700">AMラジオ</button>
+      <button id="btn-fx-robot" class="p-3 bg-white border border-slate-200 rounded-xl text-center font-bold text-xs text-slate-700">ロボット</button>
+      <button id="btn-fx-reverb" class="p-3 bg-white border border-slate-200 rounded-xl text-center font-bold text-xs text-slate-700">リバーブ</button>
+    </div>
+
+    <!-- ミキサーセクション -->
+    <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+      <div class="flex justify-between items-center">
+        <span class="text-xs font-bold text-slate-700">マイクゲイン</span>
+        <input type="range" id="slider-mic-gain" min="0" max="300" value="100" class="w-48">
+      </div>
+      <div class="flex justify-between items-center">
+        <span class="text-xs font-bold text-slate-700">マスター音量</span>
+        <input type="range" id="slider-master-volume" min="0" max="100" value="100" class="w-48">
+      </div>
+      <div class="flex gap-2">
+        <button id="btn-low-cut" class="flex-1 py-2 px-3 border border-slate-200 rounded-xl text-xs font-bold">80Hz ローカット</button>
+        <button id="btn-limiter" class="flex-1 py-2 px-3 border border-slate-200 rounded-xl text-xs font-bold bg-emerald-50 border-emerald-300 text-emerald-700">音割れ防止リミッター</button>
+      </div>
+    </div>
+
+    <!-- マイクチェック -->
+    <div class="bg-emerald-50 border border-emerald-200 p-4 rounded-2xl flex items-center justify-between">
+      <div>
+        <h3 class="text-xs font-bold text-emerald-900">マイクチェック (テスト録音)</h3>
+        <p class="text-[11px] text-emerald-700">外部スピーカーに出さずテスト発声確認</p>
+      </div>
+      <button id="btn-mic-check" class="px-4 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold">テスト録音</button>
+    </div>
+  </main>
+
+  <!-- デバイス設定モーダル -->
+  <div id="device-modal" class="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+    <div class="bg-white w-full max-w-md rounded-2xl p-6 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between border-b pb-3">
+        <h2 class="text-sm font-bold text-slate-900">オーディオデバイス設定</h2>
+        <button id="btn-close-device-modal" class="p-1 rounded-lg text-slate-400 hover:text-slate-600">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs font-bold text-slate-700">マイク入力</label>
+          <select id="select-audio-input" class="w-full p-2.5 bg-slate-50 border rounded-xl text-xs">
+            <option value="default">既定のマイク (有線イヤホン / 内蔵)</option>
+          </select>
+        </div>
+        <!-- マイク入力チャンネル (両耳ステレオ出力) -->
+        <div class="space-y-1.5">
+          <label for="select-mic-channel" class="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+            <i data-lucide="split" class="w-3.5 h-3.5 text-slate-500"></i>
+            <span>マイク入力チャンネル (両耳ステレオ出力)</span>
+          </label>
+          <select id="select-mic-channel" class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500">
+            <option value="ch1" selected>モノラル L / Ch1（有線イヤホン・通常マイク・両耳出力）</option>
+            <option value="ch2">モノラル R / Ch2（オーディオIF Ch2・両耳出力）</option>
+            <option value="mix">L+R ミックス（ステレオマイク合成・両耳出力）</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-bold text-slate-700">スピーカー出力</label>
+          <select id="select-audio-output" class="w-full p-2.5 bg-slate-50 border rounded-xl text-xs">
+            <option value="default">既定の出力 (イヤホン / スピーカー)</option>
+          </select>
+        </div>
+      </div>
+      <div class="pt-2">
+        <button id="btn-apply-device" class="w-full py-2.5 bg-slate-800 text-white text-xs font-bold rounded-xl">設定を適用する</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { AudioManager, MicChecker } from '../app.js';
+
+    const testResults = [];
+    function assert(condition, desc) {
+      testResults.push({ name: desc, pass: !!condition });
+      if (!condition) {
+        console.error('FAIL: ' + desc);
+      } else {
+        console.log('PASS: ' + desc);
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      try {
+        if (window.lucide) {
+          lucide.createIcons();
+        }
+
+        // 1. DOM 存在確認
+        assert(!!document.getElementById('mic-button'), 'マイクメインボタンが存在する');
+        assert(!!document.getElementById('btn-device-settings'), '設定ボタンが存在する');
+        assert(!!document.getElementById('device-modal'), '設定モーダルが存在する');
+        assert(document.getElementById('device-modal').classList.contains('hidden'), 'モーダル初期状態が非表示');
+
+        // 2. 新設されたマイクチャンネル選択の検証
+        const selectChannel = document.getElementById('select-mic-channel');
+        assert(!!selectChannel, '「マイク入力チャンネル (両耳ステレオ出力)」セレクトボックスが存在する');
+        assert(selectChannel.options.length === 3, '選択肢が3つ存在する');
+        assert(selectChannel.options[0].value === 'ch1', 'Option 1 が ch1 (有線イヤホン・両耳出力)');
+        assert(selectChannel.options[1].value === 'ch2', 'Option 2 が ch2 (オーディオIF Ch2)');
+        assert(selectChannel.options[2].value === 'mix', 'Option 3 が mix (L+Rミックス)');
+        assert(selectChannel.value === 'ch1', '初期選択が ch1 (有線イヤホン・両耳ステレオ)');
+
+        // 3. AudioManager と連携テスト
+        const am = new AudioManager();
+        assert(am.micChannelMode === 'ch1', 'AudioManager のデフォルトチャンネルモードが ch1');
+
+        // モーダルを開くUIテスト
+        const btnSettings = document.getElementById('btn-device-settings');
+        const modal = document.getElementById('device-modal');
+        btnSettings.addEventListener('click', () => {
+          modal.classList.remove('hidden');
+        });
+        btnSettings.click();
+        assert(!modal.classList.contains('hidden'), '設定ボタンをクリックしてモーダルが表示される');
+
+        // チャンネル切り替えUIテスト
+        selectChannel.value = 'mix';
+        selectChannel.addEventListener('change', () => {
+          am.setMicChannelMode(selectChannel.value);
+        });
+        selectChannel.dispatchEvent(new Event('change'));
+        assert(am.micChannelMode === 'mix', 'チャンネル選択を mix に変更して AudioManager に反映される');
+
+        selectChannel.value = 'ch1';
+        selectChannel.dispatchEvent(new Event('change'));
+        assert(am.micChannelMode === 'ch1', '有線イヤホン用 ch1 に復元される');
+
+        // モーダルを閉じる
+        const btnClose = document.getElementById('btn-close-device-modal');
+        btnClose.addEventListener('click', () => {
+          modal.classList.add('hidden');
+        });
+        btnClose.click();
+        assert(modal.classList.contains('hidden'), '閉じるボタンでモーダルが閉じる');
+
+        // アイコン描画確認
+        const svgCount = document.querySelectorAll('svg').length;
+        assert(svgCount >= 5, 'Lucide SVG アイコンが正常に描画されている (描画数: ' + svgCount + ')');
+
+        // 完了レポート送信
+        await fetch('/report', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            testResults,
+            svgCount,
+            finalChannelMode: am.micChannelMode
+          })
+        });
+      } catch (err) {
+        console.error("Test Exception:", err);
+        await fetch('/report', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            error: err.message,
+            testResults: [{ name: "Exception: " + err.message, pass: false }]
+          })
+        });
+      }
+    });
+  </script>
+</body>
+</html>

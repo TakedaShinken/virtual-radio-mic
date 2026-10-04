@@ -108,6 +108,39 @@
       </div>
     </section>
 
+    <!-- 1.5. 声をクリアに（全指向性マイク向け 雑音・残響カット） -->
+    <section class="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-3">
+      <div class="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
+        <div class="flex items-center gap-2">
+          <div class="p-1.5 bg-emerald-100 text-emerald-700 rounded-lg">
+            <i data-lucide="audio-lines" class="w-4 h-4"></i>
+          </div>
+          <div>
+            <h2 class="text-sm font-bold text-slate-900">声をクリアに（雑音・残響カット）</h2>
+            <p class="text-[11px] text-slate-500">内蔵マイクが拾う周りの音と部屋の響きを、軽い処理で抑えます</p>
+          </div>
+        </div>
+        <span id="voice-focus-status" class="text-xs px-2 py-0.5 rounded-full font-bold whitespace-nowrap bg-slate-100 text-slate-500">待機中</span>
+      </div>
+
+      <div class="grid grid-cols-4 gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200" role="group" aria-label="雑音・残響カットの強さ">
+        <button type="button" data-voice-focus="off" class="py-1.5 rounded-lg text-xs font-medium text-slate-600 transition-all hover:text-slate-900">OFF</button>
+        <button type="button" data-voice-focus="light" class="py-1.5 rounded-lg text-xs font-medium text-slate-600 transition-all hover:text-slate-900">弱</button>
+        <button type="button" data-voice-focus="standard" class="py-1.5 rounded-lg text-xs font-bold transition-all bg-white text-emerald-700 shadow-sm">標準</button>
+        <button type="button" data-voice-focus="strong" class="py-1.5 rounded-lg text-xs font-medium text-slate-600 transition-all hover:text-slate-900">強</button>
+      </div>
+
+      <label class="flex flex-wrap items-center gap-x-2 gap-y-0.5 cursor-pointer">
+        <input id="toggle-native-ns" type="checkbox" checked class="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500">
+        <span class="text-xs font-semibold text-slate-700">ブラウザ内蔵のノイズ抑制も使う</span>
+        <span id="native-ns-note" class="text-[10px] text-slate-400">（切り替え時に一瞬音が途切れます）</span>
+      </label>
+
+      <p class="text-[11px] text-slate-600 leading-relaxed bg-slate-50 border border-slate-200 rounded-xl p-2.5">
+        💡 いちばん効くのは<strong>マイクを口元 10〜20cm まで近づけ、マイク増幅ゲインを下げる</strong>ことです。声に対する雑音と響きの割合が大きく下がります。
+      </p>
+    </section>
+
     <!-- 2. ラジオ・音声エフェクト (FX) パネル -->
     <section class="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 space-y-3">
       <div class="flex items-center justify-between pb-2 border-b border-slate-100">
@@ -343,7 +376,7 @@
 
   <!-- デバイス選択モーダル -->
   <div id="device-modal" class="fixed inset-0 bg-slate-900/60 z-50 flex items-center justify-center p-4 hidden">
-    <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200 space-y-4">
+    <div class="bg-white rounded-2xl max-w-md w-full max-h-full overflow-y-auto p-6 shadow-xl border border-slate-200 space-y-4">
       <div class="flex items-center justify-between border-b border-slate-100 pb-3">
         <div class="flex items-center gap-2">
           <i data-lucide="settings-2" class="w-5 h-5 text-slate-700"></i>
@@ -366,6 +399,19 @@
           </select>
         </div>
 
+        <!-- マイク入力チャンネル -->
+        <div class="space-y-1.5">
+          <label for="select-mic-channel" class="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+            <i data-lucide="split" class="w-3.5 h-3.5 text-slate-500"></i>
+            <span>マイク入力チャンネル (両耳ステレオ出力)</span>
+          </label>
+          <select id="select-mic-channel" class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500">
+            <option value="ch1" selected>モノラル L / Ch1（有線イヤホン・通常マイク・両耳出力）</option>
+            <option value="ch2">モノラル R / Ch2（オーディオIF Ch2・両耳出力）</option>
+            <option value="mix">L+R ミックス（ステレオマイク合成・両耳出力）</option>
+          </select>
+        </div>
+
         <!-- スピーカー出力 -->
         <div class="space-y-1.5">
           <label for="select-audio-output" class="text-xs font-bold text-slate-700 flex items-center gap-1.5">
@@ -375,6 +421,19 @@
           <select id="select-audio-output" class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500">
             <option value="">端末の標準出力 (イヤホン端子 / 外部スピーカー / Bluetooth連動)</option>
           </select>
+        </div>
+
+        <!-- 出力方式 -->
+        <div class="space-y-1.5">
+          <label for="select-output-route" class="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+            <i data-lucide="route" class="w-3.5 h-3.5 text-slate-500"></i>
+            <span>出力方式</span>
+          </label>
+          <select id="select-output-route" class="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs sm:text-sm font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500">
+            <option value="context" selected>標準（低遅延・推奨）</option>
+            <option value="media">互換（メディア再生経由・受話口から音が出る端末向け）</option>
+          </select>
+          <p class="text-[11px] text-slate-500">通常は「標準」を使ってください。スマホで受話口からしか音が出ない場合だけ「互換」を試してください（遅延が少し増えます）。</p>
         </div>
 
         <!-- スマホ向け外部スピーカー切り替えガイド -->
@@ -401,7 +460,7 @@
     </div>
   </div>
 
-  <!-- メディアストリームルーティング用ビデオ要素 (裏ワザ2: iOSで動画再生と誤認させBluetooth A2DP/スピーカー出力を促す) -->
+  <!-- メディアストリームルーティング用ビデオ要素 (裏ワザ2: iOSで動画再生と誤認させBluetooth A2DP/スピーカー出力を促す。出力方式「互換」の時だけ使用) -->
   <video id="video-output-router" autoplay playsinline style="display:none; width:1px; height:1px;"></video>
   <canvas id="dummy-video-canvas" width="16" height="16" style="display:none;"></canvas>
 
