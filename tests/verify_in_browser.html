@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Browser Verification Runner</title>
+</head>
+<body style="margin: 0; background: #0f172a; color: #fff; font-family: sans-serif;">
+  <div style="padding: 10px; background: #1e293b; border-bottom: 1px solid #334155;">
+    <h3>Browser Verification Test Console</h3>
+    <div id="status">Testing virtual-radio-mic (real index.html) in browser...</div>
+  </div>
+  <iframe id="app-frame" src="/index.html" allow="microphone; autoplay" style="width: 430px; height: 932px; border: none; display: block; margin: 10px auto; background: #fff; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5);"></iframe>
+
+  <script>
+    // 実際の index.html を偽マイク (--use-fake-device-for-media-stream) で動かすエンドツーエンド検証
+    const statusDiv = document.getElementById('status');
+    const iframe = document.getElementById('app-frame');
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    async function waitFor(fn, timeoutMs = 8000, intervalMs = 100) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        try {
+          if (fn()) return true;
+        } catch (e) {}
+        await sleep(intervalMs);
+      }
+      return false;
+    }
+
+    async function runVerification() {
+      const testResults = [];
+      const pageErrors = [];
+
+      function assert(condition, message) {
+        testResults.push({ name: message, pass: !!condition });
+        console[condition ? 'log' : 'error']((condition ? 'PASS: ' : 'FAIL: ') + message);
+      }
+
+      await new Promise(resolve => { iframe.onload = resolve; });
+      const doc = iframe.contentDocument;
+      const win = iframe.contentWindow;
+      win.addEventListener('error', (e) => pageErrors.push(String(e.message || e)));
+      win.addEventListener('unhandledrejection', (e) => pageErrors.push(String(e.reason && e.reason.message || e.reason)));
+
+      // アイコン・Tailwind の読み込み待ち
+      await waitFor(() => doc.querySelectorAll('svg').length >= 10, 6000);
+
+      // 1. 基本 DOM
+      assert(doc.title.includes('Virtual Radio Mic'), 'ページタイトルが正常に表示されている');
+      assert(!!doc.getElementById('main-mic-btn'), 'メインマイクボタンが存在する');
+      assert(doc.getElementById('device-modal').classList.contains('hidden'), '初期状態でデバイス設定モーダルが閉じている');
+      assert(doc.querySelectorAll('svg').length >= 10, 'Lucide アイコンが SVG 描画されている (件数: ' + doc.querySelectorAll('svg').length + ')');
+
+      // 2. 安全ガイド (初回表示) を閉じる
+      const safetyModal = doc.getElementById('safety-modal');
+      assert(!safetyModal.classList.contains('hidden'), '初回はハウリング注意ガイドが表示される');
+      doc.getElementById('btn-close-safety').click();
+      assert(safetyModal.classList.contains('hidden'), 'ガイドを閉じられる');
+
+      // 3. 声をクリアに UI (初期状態)
+      const vfButtons = Array.from(doc.querySelectorAll('[data-voice-focus]'));
+      const vfStatus = doc.getElementById('voice-focus-status');
+      assert(vfButtons.map(b => b.dataset.voiceFocus).join(',') === 'off,light,standard,strong', '「声をクリアに」の強さボタン (OFF/弱/標準/強) が揃っている');
+      const selected = vfButtons.find(b => b.getAttribute('aria-pressed') === 'true');
+      assert(selected && selected.dataset.voiceFocus === 'standard', '既定の強さは「標準」');
+      assert(vfStatus.textContent === '待機中', 'マイク起動前のステータスは「待機中」');
+      assert(doc.getElementById('toggle-native-ns').checked, 'ブラウザ内蔵ノイズ抑制は既定で ON');
+
+      // 4. マイク ON (偽マイク) → AudioWorklet が実際に処理してステータスを更新する
+      doc.getElementById('main-mic-btn').click();
+      // 低速・高負荷の端末では Chromium の音声サービス起動に時間がかかるため長めに待つ
+      const onAir = await waitFor(() => doc.getElementById('mic-status-text').textContent === 'ON AIR', 20000);
+      assert(onAir, 'マイクボタンで ON AIR になる (getUserMedia + AudioContext 初期化成功)');
+      const workletRunning = await waitFor(() => /声を検出中|雑音カット中/.test(vfStatus.textContent), 8000);
+      assert(workletRunning, 'Worklet のメーター通知で「声をクリアに」のステータスが更新される (ブラウザ内で処理中: ' + vfStatus.textContent + ')');
+      assert(!/簡易モード/.test(vfStatus.textContent), 'AudioWorklet が読み込まれている (簡易モードではない)');
+
+      // 5. 出力は 1 経路だけ (標準モードでは video 要素を使わない = 二重再生による響きが起きない)
+      const video = doc.getElementById('video-output-router');
+      assert(video && !video.srcObject && video.paused, '標準の出力方式では video 要素で同時再生しない');
+
+      // 6. ブラウザ内蔵ノイズ抑制の対応表示
+      const nsNote = doc.getElementById('native-ns-note').textContent;
+      assert(!doc.getElementById('toggle-native-ns').disabled && /途切れ/.test(nsNote), 'Chromium では内蔵ノイズ抑制が使用可能と表示される');
+
+      // 7. 強さの切り替えと保存
+      vfButtons.find(b => b.dataset.voiceFocus === 'off').click();
+      await sleep(100);
+      assert(vfStatus.textContent === 'OFF', 'OFF を選ぶとステータスが OFF になる');
+      vfButtons.find(b => b.dataset.voiceFocus === 'strong').click();
+      const strongRunning = await waitFor(() => /声を検出中|雑音カット中/.test(vfStatus.textContent), 5000);
+      assert(strongRunning, '「強」に戻すと処理が再開する');
+      assert(win.localStorage.getItem('voice_focus_level') === 'strong', '選んだ強さが保存される');
+
+      // 8. デバイス設定モーダル (出力方式・入力チャンネル)
+      doc.getElementById('btn-device-settings').click();
+      await waitFor(() => !doc.getElementById('device-modal').classList.contains('hidden'), 3000);
+      const modal = doc.getElementById('device-modal');
+      assert(!modal.classList.contains('hidden'), '設定ボタンでデバイス設定モーダルが開く');
+      const panelRect = modal.firstElementChild.getBoundingClientRect();
+      assert(panelRect.top >= 0 && panelRect.bottom <= win.innerHeight, 'デバイス設定モーダルが画面内に収まる (はみ出す分はパネル内でスクロール)');
+      const route = doc.getElementById('select-output-route');
+      assert(route && route.value === 'context', '出力方式の既定は「標準（低遅延）」');
+      const selectChannel = doc.getElementById('select-mic-channel');
+      assert(selectChannel && selectChannel.value === 'ch1', 'マイク入力チャンネルの既定は ch1');
+      doc.getElementById('btn-close-device-modal').click();
+      assert(modal.classList.contains('hidden'), '閉じるボタンでモーダルが閉じる');
+
+      // 9. マイクチェック (処理後の声を録音) が完了する
+      doc.getElementById('btn-record-check').click();
+      const recorded = await waitFor(() => doc.getElementById('check-status-badge').textContent === '録音完了', 7000);
+      assert(recorded && !doc.getElementById('btn-play-check').disabled, '3秒テスト録音が完了し再生できる');
+
+      // 10. トークモード切り替え (PTT に切り替えるとマイクは OFF になる仕様) & トグルで ON/OFF
+      const micStatus = doc.getElementById('mic-status-text');
+      doc.getElementById('mode-ptt-btn').click();
+      await sleep(100);
+      assert(doc.getElementById('mode-ptt-btn').classList.contains('bg-white'), 'PTT モードに切り替わる');
+      assert(micStatus.textContent === 'STANDBY', 'PTT に切り替えるとマイクは STANDBY になる');
+      doc.getElementById('mode-toggle-btn').click();
+      await sleep(100);
+      doc.getElementById('main-mic-btn').click();
+      await waitFor(() => micStatus.textContent === 'ON AIR', 3000);
+      assert(micStatus.textContent === 'ON AIR', 'トグルモードでマイクを ON にできる');
+      doc.getElementById('main-mic-btn').click();
+      await waitFor(() => micStatus.textContent === 'STANDBY', 3000);
+      assert(micStatus.textContent === 'STANDBY', 'トグルモードでマイクを OFF にできる');
+
+      assert(pageErrors.length === 0, 'ページで未処理のエラーが発生していない' + (pageErrors.length ? ': ' + pageErrors.join(' | ') : ''));
+
+      const report = {
+        testResults,
+        title: doc.title,
+        iconsCount: doc.querySelectorAll('svg').length,
+        channelMode: selectChannel ? selectChannel.value : null,
+        voiceFocusStatus: vfStatus.textContent
+      };
+      statusDiv.innerHTML = '<span style="color: #4ade80;">Verification Completed! Sending report...</span>';
+      await fetch('/report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(report)
+      });
+    }
+
+    runVerification().catch(err => {
+      console.error("Verification error:", err);
+      fetch('/report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: err.toString() })
+      });
+    });
+  </script>
+</body>
+</html>
