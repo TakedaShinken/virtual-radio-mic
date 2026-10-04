@@ -52,16 +52,22 @@
       assert(doc.getElementById('device-modal').classList.contains('hidden'), '初期状態でデバイス設定モーダルが閉じている');
       assert(doc.querySelectorAll('svg').length >= 10, 'Lucide アイコンが SVG 描画されている (件数: ' + doc.querySelectorAll('svg').length + ')');
 
-      // 2. 安全ガイド (初回表示) を閉じる
-      const safetyModal = doc.getElementById('safety-modal');
-      assert(!safetyModal.classList.contains('hidden'), '初回はハウリング注意ガイドが表示される');
-      doc.getElementById('btn-close-safety').click();
-      assert(safetyModal.classList.contains('hidden'), 'ガイドを閉じられる');
+      // 2. 画面構成 (ハウリング警告なし・サブタイトルなし・ノイズキャンセリングはミキサーの直前)
+      assert(!doc.getElementById('safety-modal') && !doc.getElementById('btn-safety-guide'), 'ハウリング警告 (ボタン・モーダル) が表示されない');
+      assert(doc.querySelector('header').textContent.trim() === 'Virtual Radio Mic', 'ヘッダーはタイトルのみ (サブタイトルなし)');
+      const sections = Array.from(doc.querySelectorAll('main > section'));
+      const titleOf = (sec) => (sec.querySelector('h2') || {}).textContent || '';
+      const ncIndex = sections.findIndex(sec => titleOf(sec) === 'ノイズキャンセリング');
+      assert(ncIndex >= 0, '「ノイズキャンセリング」セクションがある');
+      assert(ncIndex >= 0 && /音量 & 音質詳細ミキサー/.test(titleOf(sections[ncIndex + 1] || doc.body)), 'ノイズキャンセリングは「音量 & 音質詳細ミキサー」の直前にある');
+      const ncSection = sections[ncIndex];
+      assert(ncSection && ncSection.contains(doc.getElementById('toggle-lowcut')) && ncSection.contains(doc.getElementById('toggle-limiter')), '吹かれ防止・音割れ防止はノイズキャンセリング内にある');
+      assert(!/声をクリアに/.test(doc.body.textContent), '旧名称「声をクリアに」が残っていない');
 
-      // 3. 声をクリアに UI (初期状態)
+      // 3. ノイズキャンセリング UI (初期状態)
       const vfButtons = Array.from(doc.querySelectorAll('[data-voice-focus]'));
       const vfStatus = doc.getElementById('voice-focus-status');
-      assert(vfButtons.map(b => b.dataset.voiceFocus).join(',') === 'off,light,standard,strong', '「声をクリアに」の強さボタン (OFF/弱/標準/強) が揃っている');
+      assert(vfButtons.map(b => b.dataset.voiceFocus).join(',') === 'off,light,standard,strong', 'ノイズキャンセリングの強さボタン (OFF/弱/標準/強) が揃っている');
       const selected = vfButtons.find(b => b.getAttribute('aria-pressed') === 'true');
       assert(selected && selected.dataset.voiceFocus === 'standard', '既定の強さは「標準」');
       assert(vfStatus.textContent === '待機中', 'マイク起動前のステータスは「待機中」');
@@ -73,7 +79,7 @@
       const onAir = await waitFor(() => doc.getElementById('mic-status-text').textContent === 'ON AIR', 20000);
       assert(onAir, 'マイクボタンで ON AIR になる (getUserMedia + AudioContext 初期化成功)');
       const workletRunning = await waitFor(() => /声を検出中|雑音カット中/.test(vfStatus.textContent), 8000);
-      assert(workletRunning, 'Worklet のメーター通知で「声をクリアに」のステータスが更新される (ブラウザ内で処理中: ' + vfStatus.textContent + ')');
+      assert(workletRunning, 'Worklet のメーター通知でノイズキャンセリングのステータスが更新される (ブラウザ内で処理中: ' + vfStatus.textContent + ')');
       assert(!/簡易モード/.test(vfStatus.textContent), 'AudioWorklet が読み込まれている (簡易モードではない)');
 
       // 5. 出力は 1 経路だけ (標準モードでは video 要素を使わない = 二重再生による響きが起きない)

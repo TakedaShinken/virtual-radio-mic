@@ -1,4 +1,4 @@
-const CACHE_NAME = 'virtual-mic-v2';
+const CACHE_NAME = 'virtual-mic-v3';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',

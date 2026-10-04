@@ -4,7 +4,7 @@
  */
 
 /**
- * 声をクリアに（全指向性マイク向け 雑音・残響カット）の強さプリセット
+ * ノイズキャンセリング（全指向性マイク向け 雑音・残響カット）の強さプリセット
  * hpfHz / mudDb / lpfHz はネイティブ BiquadFilter、それ以外は voice-focus-worklet.js が使う
  *   margin / gateRange / holdMs / releaseMs: 適応ノイズゲート
  *   low* / high* / tailDeadband / bandReleaseMs: 残響テール抑制 (子音を守るため高域は控えめ)
@@ -76,7 +76,7 @@ class AudioManager {
     this.isLimiterEnabled = true;
     this.fxDisconnectTimers = {};
 
-    // 声をクリアに（全指向性マイク向け 雑音・残響カット）
+    // ノイズキャンセリング（全指向性マイク向け 雑音・残響カット）
     this.voiceHpfNode = null;
     this.voiceMudNode = null;
     this.voiceLpfNode = null;
@@ -221,7 +221,7 @@ class AudioManager {
     this.micGainNode.channelCount = 1;
     this.micGainNode.channelCountMode = 'explicit';
 
-    // 2.5. 声をクリアに（全指向性マイク向け 雑音・残響カット）
+    // 2.5. ノイズキャンセリング（全指向性マイク向け 雑音・残響カット）
     //   ネイティブ EQ: 低域の響きと吹かれ / 300Hz 付近のこもり / 高域のヒスを削る (ハウリングを招くブーストはしない)
     //   AudioWorklet: 適応ノイズゲート + 残響テール抑制 (voice-focus-worklet.js)
     const preset = VOICE_FOCUS_PRESETS[this.voiceFocusLevel] || VOICE_FOCUS_PRESETS.standard;
@@ -383,7 +383,7 @@ class AudioManager {
       this.inputBus.connect(this.micGainNode);
     }
 
-    // MicGain -> [声をクリアに] -> voiceOutputNode
+    // MicGain -> [ノイズキャンセリング] -> voiceOutputNode
     this.rewireVoiceChain();
 
     // voiceOutputNode -> Dry + 有効な FX 入力 (OFF の FX は切り離して CPU を使わせない)
@@ -417,7 +417,7 @@ class AudioManager {
   async loadVoiceFocusWorklet(preset) {
     if (!this.ctx || this.voiceFocusNode) return;
     if (!this.ctx.audioWorklet || typeof AudioWorkletNode === 'undefined') {
-      console.warn("AudioWorklet 非対応: 声をクリアに は EQ のみの簡易モードで動作します");
+      console.warn("AudioWorklet 非対応: ノイズキャンセリングは EQ のみの簡易モードで動作します");
       return;
     }
     try {
@@ -875,7 +875,7 @@ class MicChecker {
       output.fill(0);
     };
 
-    // 処理済みの声 (マイクゲイン・声をクリアに 適用後) -> プロセッサー -> ゼロ出力 (ダミー接続)
+    // 処理済みの声 (マイクゲイン・ノイズキャンセリング適用後) -> プロセッサー -> ゼロ出力 (ダミー接続)
     const inputSource = this.audioManager.voiceOutputNode || this.audioManager.inputBus || this.audioManager.sourceNode;
     if (inputSource) {
       this.zeroGainNode = ctx.createGain();
@@ -1187,10 +1187,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const checkProgressBar = document.getElementById('check-progress-bar');
 
   // Modals
-  const safetyModal = document.getElementById('safety-modal');
-  const btnSafetyGuide = document.getElementById('btn-safety-guide');
-  const btnCloseSafety = document.getElementById('btn-close-safety');
-
   const deviceModal = document.getElementById('device-modal');
   const btnDeviceSettings = document.getElementById('btn-device-settings');
   const btnCloseDeviceModal = document.getElementById('btn-close-device-modal');
@@ -1200,7 +1196,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const selectOutputRoute = document.getElementById('select-output-route');
   const btnApplyDevice = document.getElementById('btn-apply-device');
 
-  // 声をクリアに Elements
+  // ノイズキャンセリング Elements
   const voiceFocusButtons = Array.from(document.querySelectorAll('[data-voice-focus]'));
   const voiceFocusStatus = document.getElementById('voice-focus-status');
   const toggleNativeNs = document.getElementById('toggle-native-ns');
@@ -1223,20 +1219,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   audioManager.voiceFocusLevel = (savedVoiceFocus === 'off' || VOICE_FOCUS_PRESETS[savedVoiceFocus]) ? savedVoiceFocus : 'standard';
   audioManager.useNativeNoiseSuppression = loadSetting('native_noise_suppression', 'on') !== 'off';
   audioManager.outputRoute = loadSetting('output_route', 'context') === 'media' ? 'media' : 'context';
-
-  // 初回安全モーダル
-  if (!localStorage.getItem('safety_agreed')) {
-    safetyModal.classList.remove('hidden');
-  }
-
-  btnCloseSafety.addEventListener('click', () => {
-    localStorage.setItem('safety_agreed', 'true');
-    safetyModal.classList.add('hidden');
-  });
-
-  btnSafetyGuide.addEventListener('click', () => {
-    safetyModal.classList.remove('hidden');
-  });
 
   // 初期化関数 (連打されても初期化は 1 回だけ。二重に getUserMedia するとマイク入力が重複する)
   let initPromise = null;
@@ -1361,7 +1343,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // --- 声をクリアに（全指向性マイク向け 雑音・残響カット） ---
+  // --- ノイズキャンセリング（全指向性マイク向け 雑音・残響カット） ---
   const VOICE_FOCUS_BTN_ACTIVE = 'py-1.5 rounded-lg text-xs font-bold transition-all bg-white text-emerald-700 shadow-sm';
   const VOICE_FOCUS_BTN_IDLE = 'py-1.5 rounded-lg text-xs font-medium text-slate-600 transition-all hover:text-slate-900';
   const VOICE_STATUS_TONES = {

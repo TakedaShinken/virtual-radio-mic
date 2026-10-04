@@ -274,7 +274,7 @@ const mc = new MicChecker(am);
 await mc.startTestRecording(1);
 const recordingTap = mc.processorNode;
 assert.ok(recordingTap, "processorNode must be created");
-assert.ok(isLinked(am.voiceOutputNode, recordingTap), "voiceOutputNode must connect to processorNode during mic check (mic gain + 声をクリアに are audible in the check)");
+assert.ok(isLinked(am.voiceOutputNode, recordingTap), "voiceOutputNode must connect to processorNode during mic check (mic gain + ノイズキャンセリング are audible in the check)");
 
 mc.stopRecording();
 assert.strictEqual(mc.processorNode, null, "processorNode must be null after stopRecording");
@@ -370,7 +370,7 @@ console.log("\nTest 12: getUserMedia constraints (native NS on, AEC/AGC off, no 
 console.log("  PASS: Constraints are tuned for PA use and NS can be toggled at runtime");
 
 // --- TEST 13: Voice Focus chain wiring (EQ-only fallback when AudioWorklet is unavailable) ---
-console.log("\nTest 13: 声をクリアに chain wiring and presets (no AudioWorklet -> EQ-only fallback)");
+console.log("\nTest 13: ノイズキャンセリング chain wiring and presets (no AudioWorklet -> EQ-only fallback)");
 {
   assert.strictEqual(am.voiceFocusLevel, 'standard', "default level must be 'standard'");
   assert.strictEqual(am.voiceFocusNode, null, "mock context has no AudioWorklet -> no worklet node");
@@ -410,7 +410,7 @@ console.log("\nTest 13: 声をクリアに chain wiring and presets (no AudioWor
 console.log("  PASS: Voice chain switches OFF/ON/presets cleanly and keeps a single path");
 
 // --- TEST 14: Voice Focus with AudioWorklet support ---
-console.log("\nTest 14: 声をクリアに inserts the AudioWorklet and sends preset configs");
+console.log("\nTest 14: ノイズキャンセリング inserts the AudioWorklet and sends preset configs");
 {
   class MockAudioWorkletNode extends MockAudioNode {
     constructor(ctx, name, options) {
