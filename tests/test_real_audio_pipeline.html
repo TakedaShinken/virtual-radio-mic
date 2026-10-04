@@ -214,7 +214,7 @@
     return results;
   }
 
-  // ===== 声をクリアに（雑音・残響カット）& 低負荷の目標テスト =====
+  // ===== ノイズキャンセリング（雑音・残響カット）& 低負荷の目標テスト =====
   const SR = 48000;
 
   // 再現性のある乱数 (mulberry32)
@@ -591,17 +591,17 @@
       const rtf = (seconds * 1000) / stdMs;
       const overheadPct = Math.max(0, (stdMs - offMs) / (seconds * 1000)) * 100;
       results.push({
-        name: "Goal[low-load]: full chain with 声をクリアに renders >= 10x faster than real time",
+        name: "Goal[low-load]: full chain with ノイズキャンセリング renders >= 10x faster than real time",
         pass: rtf >= 10,
         details: `${rtf.toFixed(1)}x real time (${stdMs.toFixed(0)} ms for ${seconds} s)`
       });
       results.push({
-        name: "Goal[low-load]: 声をクリアに overhead <= 3% of one core in real time",
+        name: "Goal[low-load]: ノイズキャンセリング overhead <= 3% of one core in real time",
         pass: overheadPct <= 3,
         details: `overhead ${overheadPct.toFixed(2)}% (off ${offMs.toFixed(0)} ms / standard ${stdMs.toFixed(0)} ms)`
       });
       results.push({
-        name: "Goal[low-load]: new graph incl. 声をクリアに is lighter than the old always-on-FX graph",
+        name: "Goal[low-load]: new graph incl. ノイズキャンセリング is lighter than the old always-on-FX graph",
         pass: stdMs < legacyMs,
         details: `standard ${stdMs.toFixed(0)} ms < legacy ${legacyMs.toFixed(0)} ms (${(100 * (1 - stdMs / legacyMs)).toFixed(0)}% less)`
       });
